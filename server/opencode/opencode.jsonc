@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "opencode",
+  "autoupdate": false,
+  "share": "disabled",
+  "default_agent": "per",
+  "agent": {
+    "build": { "disable": true },
+    "plan": { "disable": true },
+    "general": { "disable": true },
+    "explore": { "disable": true }
+  },
+  "plugin": [
+    "opencode-gemini-auth@latest",
+    "opencode-evolve"
+  ]
+}

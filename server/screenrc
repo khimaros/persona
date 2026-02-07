@@ -1,0 +1,11 @@
+startup_message off
+nethack on
+hardstatus off
+caption always "%?%F%{= Kw}%:%{=u kR}%?  %h %-024=%{+b} %C%a %D %d %M %Y%{= db}"
+hardstatus alwayslastline "%{= kR} %-Lw%{= Kw} %n%f %t %{-}%+Lw %=%{= dd}"
+defscrollback 3000
+vbell off
+vbell_msg "  Ding! ---- Ding!  "
+term xterm
+shell -$SHELL
+bind / eval "clear" "scrollback 0" "scrollback 15000"

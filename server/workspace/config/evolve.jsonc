@@ -1,0 +1,5 @@
+{
+  "hook": "hooks/persona.py",
+  "heartbeat_agent": "per",
+  "test_script": "tests/persona_test.py"
+}

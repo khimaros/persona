@@ -1,0 +1,60 @@
+persona_template: &persona_instance
+  image: images:debian/14
+  shared_folder: false
+  provision:
+    - ssh: true
+    - copy:
+        source: ./incant.env
+        target: /etc/incant.env
+        mode: "0644"
+        uid: 0
+        gid: 0
+    # system provisioning
+    - |
+      #!/bin/bash
+      source /etc/incant.env
+      set -xeuo pipefail
+      apt update
+      apt -y full-upgrade --autoremove --purge
+      apt -y install vim screen git curl rsync sudo
+      apt -y install npm
+      #apt -y install cargo
+      which opencode || npm install -g opencode-ai
+    - copy:
+        source: ./screenrc
+        target: /etc/screenrc
+        mode: "0644"
+        uid: 0
+        gid: 0
+    # user provisioning
+    - |
+      #!/bin/bash
+      source /etc/incant.env
+      set -xeuo pipefail
+      id $USER_NAME || adduser --uid=1000 --disabled-password --gecos "" $USER_NAME
+      adduser "$USER_NAME" sudo
+      echo "$USER_NAME ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/$USER_NAME
+    - copy:
+        source: ./systemd/opencode.service
+        target: /home/persona/.config/systemd/user/opencode.service
+        mode: "0644"
+        uid: 1000
+        gid: 1000
+        create_dirs: true
+    - copy:
+        source: ./opencode
+        target: /home/persona/.config/
+        recursive: true
+        create_dirs: true
+    - |
+      #!/bin/bash
+      set -xeuo pipefail
+      source /etc/incant.env
+      chown -R $USER_NAME:$USER_NAME $USER_HOME
+      loginctl enable-linger $USER_NAME
+
+
+instances:
+  persona: *persona_instance
+  persona-dev: *persona_instance
+  persona-demo: *persona_instance

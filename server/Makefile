@@ -1,0 +1,120 @@
+include incant.env
+
+INSTANCE?="persona"
+
+API_HOST?="localhost"
+
+API_BASE?="http://$(API_HOST):7860/v1"
+
+ADDRESS=$(shell incus list -f json $(INSTANCE) | jq -r '.[0].state.network.eth0.addresses[] | select(.family == "inet") .address' | head -n 1)
+
+default:
+.PHONY: default
+
+create: up push-workspace provision-user
+.PHONY: create
+
+update: provision provision-user
+.PHONY: update
+
+bootstrap:
+	sudo apt install incant jq
+.PHONY: bootstrap
+
+up:
+	incant up $(INSTANCE)
+.PHONY: up
+
+provision:
+	incant provision $(INSTANCE)
+.PHONY: provision
+
+provision-user: push-ssh-pubkeys
+	incus file push --mode 0755 --uid 1000 --gid 1000 ./incant-user.sh $(INSTANCE)/$(USER_HOME)/incant-user.sh
+	ssh $(USER_NAME)@$(ADDRESS) -- ./incant-user.sh
+.PHONY: provision-user
+
+reset-workspace: clear-workspace push-workspace
+.PHONY: reset-workspace
+
+clear-workspace:
+	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/workspace/
+.PHONY: clear-workspace
+
+push-hooks:
+	incus file push --recursive ./workspace/hooks/ $(INSTANCE)/$(USER_HOME)/workspace/
+.PHONY: push-hooks
+
+push-workspace:
+	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
+.PHONY: push-workspace
+
+push-ssh-pubkeys:
+	cat $(HOME)/.ssh/*.pub > /tmp/incant-authorized_keys
+	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 /tmp/incant-authorized_keys $(INSTANCE)/$(USER_HOME)/.ssh/authorized_keys; rm /tmp/incant-authorized_keys
+	ssh $(USER_NAME)@$(ADDRESS) -o StrictHostKeyChecking=accept-new -- true
+.PHONY: push-ssh-pubkeys
+
+push-opencode-auth:
+	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 $(HOME)/.local/share/opencode/auth.json $(INSTANCE)/$(USER_HOME)/.local/share/opencode/
+.PHONY: push-opencode-auth
+
+push-opencode-providers:
+	ssh $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.config/opencode/skills/opencode-operate/scripts/update-opencode-models --api-base $(API_BASE)
+.PHONY: push-opencode-providers
+
+cleanup-browsers:
+	ssh $(USER_NAME)@$(ADDRESS) -- pkill -9 -f browser
+.PHONY: cleanup-browsers
+
+service-restart:
+	ssh $(USER_NAME)@$(ADDRESS) -- systemctl --user restart opencode.service
+.PHONY: service-restart
+
+ssh:
+	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- screen -x -R -S control
+.PHONY: ssh
+
+browser-head:
+	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --session default --headed --user-data-dir $(USER_HOME)/.browser-use/ open about:blank
+	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --session default close
+.PHONY: browser-head
+
+webui:
+	open http://$(ADDRESS):4096/
+.PHONY: webui
+
+tui:
+	opencode attach http://$(ADDRESS):4096
+.PHONY: tui
+
+start:
+	incus start $(INSTANCE)
+.PHONY: start
+
+stop:
+	incus stop $(INSTANCE)
+.PHONY: stop
+
+restart:
+	incus restart $(INSTANCE)
+.PHONY: restart
+
+destroy:
+	incant destroy $(INSTANCE)
+.PHONY: destroy
+
+console:
+	@clear
+	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -f
+.PHONY: console
+
+console-evolve:
+	@clear
+	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -g '^\\[evolve\\]:' -f
+.PHONY: console-evolve
+
+console-persona:
+	@clear
+	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -g '^\\[evolve\\]:\ \\[🌀\\]' -f
+.PHONY: console-persona

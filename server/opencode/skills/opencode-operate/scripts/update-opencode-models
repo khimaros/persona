@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.request
+from pathlib import Path
+
+
+def fetch_models(base_url):
+    url = f"{base_url.rstrip('/')}/models"
+    try:
+        with urllib.request.urlopen(url) as response:
+            data = json.loads(response.read().decode())
+            return data.get("data", [])
+    except Exception as e:
+        print(f"!!! Error fetching models from {url}: {e}", file=sys.stderr)
+        return None
+
+
+def is_text_model(llamaswap_meta):
+    """check if model supports text input/output and is tuned for instruct/code/tools"""
+    modsi = set(llamaswap_meta.get("modsi", "").split(","))
+    modso = set(llamaswap_meta.get("modso", "").split(","))
+    tuned = set(llamaswap_meta.get("tuned", "").split(","))
+    required_tuned = {"instruct", "code", "tools"}
+    return "text" in modsi and "text" in modso and required_tuned.issubset(tuned)
+
+
+def process_models(models_data):
+    new_models = {}
+    for model in models_data:
+        model_id = model.get("id")
+        if not model_id:
+            continue
+
+        meta = model.get("meta", {})
+        llamaswap_meta = meta.get("llamaswap", {})
+        context_size = llamaswap_meta.get("max_tokens")
+
+        if context_size and is_text_model(llamaswap_meta):
+            new_models[model_id] = {"limit": {"context": context_size, "output": 0}}
+
+    return new_models
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Sync llama-swap models to opencode config",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Example:\n  update-opencode-models ./etc/opencode/opencode.json",
+    )
+    parser.add_argument(
+        "opencode_config",
+        nargs="?",
+        help="Path to opencode config file",
+    )
+    parser.add_argument(
+        "--api-base",
+        help="Additional API base URL to sync models from",
+    )
+
+    args = parser.parse_args()
+
+    opencode_config_path = None
+    if args.opencode_config:
+        opencode_config_path = os.path.expanduser(args.opencode_config)
+    elif os.environ.get("OPENCODE_CONFIG"):
+        opencode_config_path = os.path.expanduser(os.environ["OPENCODE_CONFIG"])
+    else:
+        config_dir = os.path.join(os.path.expanduser("~"), ".config/opencode")
+        for filename in ["opencode.jsonc", "opencode.json"]:
+            path = os.path.join(config_dir, filename)
+            if os.path.exists(path):
+                opencode_config_path = path
+                break
+        if not opencode_config_path:
+            opencode_config_path = os.path.join(config_dir, "opencode.json")
+
+    if not os.path.exists(opencode_config_path):
+        print(
+            f"!!! opencode config file not found: {opencode_config_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    with open(opencode_config_path, "r") as f:
+        content = f.read()
+        if opencode_config_path.endswith(".jsonc"):
+            content = re.sub(r"^\s*//.*$", "", content, flags=re.MULTILINE)
+            content = re.sub(r"\s+//.*$", "", content, flags=re.MULTILINE)
+            content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+        opencode_config = json.loads(content)
+
+    if "provider" not in opencode_config:
+        opencode_config["provider"] = {}
+
+    providers = opencode_config["provider"]
+
+    if args.api_base:
+        base_url = args.api_base.rstrip("/")
+        exists = any(
+            cfg.get("options", {}).get("baseURL", "").rstrip("/") == base_url
+            for cfg in providers.values()
+        )
+        if not exists:
+            name = "openai-compatible"
+            if name in providers:
+                i = 1
+                while f"{name}-{i}" in providers:
+                    i += 1
+                name = f"{name}-{i}"
+            providers[name] = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": name,
+                "options": {"baseURL": base_url, "timeout": 14400000},
+                "models": {},
+            }
+
+    compatible_providers = [
+        name
+        for name, cfg in providers.items()
+        if cfg.get("npm") == "@ai-sdk/openai-compatible"
+    ]
+
+    updated_count = 0
+
+    if compatible_providers:
+        for name in compatible_providers:
+            base_url = (
+                providers[name]
+                .get("options", {})
+                .get("baseURL", "http://localhost:7860/v1")
+            )
+            models_data = fetch_models(base_url)
+            if models_data is not None:
+                providers[name]["models"] = process_models(models_data)
+                updated_count += 1
+            else:
+                print(
+                    f"!!! Skipping update for '{name}' due to fetch error.",
+                    file=sys.stderr,
+                )
+    else:
+        # Fallback default
+        base_url = "http://localhost:7860/v1"
+        models_data = fetch_models(base_url)
+        if models_data is not None:
+            providers["llama.cpp"] = {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "llama.cpp (local)",
+                "options": {"baseURL": base_url, "timeout": 14400000},
+                "models": process_models(models_data),
+            }
+            updated_count += 1
+
+    if updated_count > 0:
+        with open(opencode_config_path, "w") as f:
+            json.dump(opencode_config, f, indent=2)
+        print(
+            f"Successfully updated {updated_count} provider(s) in {opencode_config_path}"
+        )
+    else:
+        print("No providers updated.")
+
+
+if __name__ == "__main__":
+    main()
