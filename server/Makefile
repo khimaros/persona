@@ -45,6 +45,10 @@ push-hooks:
 	incus file push --recursive ./workspace/hooks/ $(INSTANCE)/$(USER_HOME)/workspace/
 .PHONY: push-hooks
 
+push-evolve-config:
+	incus file push --recursive ./workspace/config/evolve.jsonc $(INSTANCE)/$(USER_HOME)/workspace/config/
+.PHONY: push-evolve-config
+
 push-workspace:
 	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
 .PHONY: push-workspace
@@ -103,6 +107,10 @@ restart:
 destroy:
 	incant destroy $(INSTANCE)
 .PHONY: destroy
+
+forward-port:
+	incus config device add $(INSTANCE) port-4096 proxy listen=tcp:0.0.0.0:4096 connect=tcp:127.0.0.1:4096
+.PHONY: forward-port
 
 console:
 	@clear
