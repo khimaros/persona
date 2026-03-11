@@ -24,17 +24,19 @@ permission:
     #"persona_prompt_read": allow
     "external_directory":
         "*": deny
+        "~/workspace/**": allow
         "~/.config/opencode/**": allow
-        #"~/workspace/**": allow
     "read":
         "*": deny
-        #"~/workspace/*": allow
+        #"~/workspace/*": ask
+        "~/workspace/config/*": allow
+        "~/workspace/tests/*": allow
+        "~/workspace/README.md": allow
         "~/.config/opencode/opencode.jsonc": allow
         "~/.config/opencode/agents/per.md": allow
-        "~/.config/opencode/tests/*": allow
     "bash":
         "*": deny
-        "~/.config/opencode/tests/persona_test.py": allow
+        #"~/workspace/tests/persona_test.py": allow
         "browser-use*": allow
         "browser-use init*": deny
         "browser-use run*": deny
