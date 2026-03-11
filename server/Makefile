@@ -45,6 +45,14 @@ clear-workspace:
 	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/workspace/
 .PHONY: clear-workspace
 
+push-workspace:
+	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
+.PHONY: push-workspace
+
+push-tests:
+	incus file push --recursive ./workspace/tests/ $(INSTANCE)/$(USER_HOME)/workspace/
+.PHONY: push-tests
+
 push-hooks:
 	incus file push --recursive ./workspace/hooks/ $(INSTANCE)/$(USER_HOME)/workspace/
 .PHONY: push-hooks
@@ -52,10 +60,6 @@ push-hooks:
 push-evolve-config:
 	incus file push --recursive ./workspace/config/evolve.jsonc $(INSTANCE)/$(USER_HOME)/workspace/config/
 .PHONY: push-evolve-config
-
-push-workspace:
-	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
-.PHONY: push-workspace
 
 push-ssh-pubkeys:
 	cat $(HOME)/.ssh/*.pub > /tmp/incant-authorized_keys

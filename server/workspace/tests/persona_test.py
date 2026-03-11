@@ -2,7 +2,6 @@
 """end-to-end tests for persona hook dispatcher (JSONL IPC)."""
 
 import json, os, re, shutil, subprocess, sys, tempfile
-from datetime import datetime, timezone
 
 PASS = FAIL = 0
 
@@ -95,24 +94,6 @@ try:
     check("request includes preamble", "preamble" in system_text)
     check("request includes chat prompt", "chat" in system_text)
     check("request logs core traits", any("core:" in l for l in logs))
-
-    # --- mutate_request env block ---
-
-    env_match = re.search(r"<env>(.*?)</env>", system_text, re.DOTALL)
-    check("request has env block", env_match is not None)
-    if env_match:
-        env_content = env_match.group(1).strip()
-        env_lines = [l.strip() for l in env_content.splitlines() if l.strip()]
-        check("env block has exactly 1 line", len(env_lines) == 1, f"got {len(env_lines)}: {env_lines}")
-        check("env line is session start time", env_lines[0].startswith("Session start time:") if env_lines else False,
-              f"got: {env_lines[0] if env_lines else '(empty)'}")
-        # verify timestamp is actually UTC (not local time mislabeled)
-        ts_match = re.search(r"Session start time: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC", env_lines[0]) if env_lines else None
-        if ts_match:
-            reported = datetime.strptime(ts_match.group(1), "%Y-%m-%d %H:%M:%S")
-            utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
-            drift = abs((utc_now - reported).total_seconds())
-            check("env timestamp is UTC (not local)", drift < 5, f"drift: {drift:.0f}s")
 
     # --- mutate_request marker detection ---
 

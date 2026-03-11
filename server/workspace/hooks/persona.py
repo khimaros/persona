@@ -2,7 +2,6 @@
 """persona hook dispatcher."""
 
 import json, sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, TypedDict, get_type_hints
 
@@ -82,9 +81,6 @@ def system_prompt(mode=None):
     listed = listed_trait_names()
     if listed:
         parts.append(f"\nadditional traits (use trait_read to view): {', '.join(listed)}\n")
-    parts.append(
-        f"\n<env>\nSession start time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n</env>\n"
-    )
     return ["".join(parts)]
 
 @tool
