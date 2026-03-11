@@ -1,7 +1,7 @@
 {
   "hook": "hooks/persona.py",
   "heartbeat_agent": "per",
-  "heartbeat_cleanup": "archive",
+  "heartbeat_cleanup": "new",
   "heartbeat_cleanup_count": 1,
   "test_script": "tests/persona_test.py"
 }
