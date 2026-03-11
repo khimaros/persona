@@ -34,6 +34,10 @@ provision-user: push-ssh-pubkeys
 	ssh $(USER_NAME)@$(ADDRESS) -- ./incant-user.sh
 .PHONY: provision-user
 
+clear-opencode:
+	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/.config/opencode/
+.PHONY: clear-opencode
+
 reset-workspace: clear-workspace push-workspace
 .PHONY: reset-workspace
 

@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
-WorkingDirectory=%h
+WorkingDirectory=%h/workspace/
 ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --print-logs
 Restart=on-failure
 
