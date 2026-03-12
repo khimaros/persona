@@ -49,17 +49,17 @@ push-workspace:
 	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
 .PHONY: push-workspace
 
-push-tests:
+push-workspace-tests:
 	incus file push --recursive ./workspace/tests/ $(INSTANCE)/$(USER_HOME)/workspace/
-.PHONY: push-tests
+.PHONY: push-workspace-tests
 
-push-hooks:
+push-workspace-hooks:
 	incus file push --recursive ./workspace/hooks/ $(INSTANCE)/$(USER_HOME)/workspace/
-.PHONY: push-hooks
+.PHONY: push-workspace-hooks
 
-push-evolve-config:
+push-workspace-config:
 	incus file push --recursive ./workspace/config/evolve.jsonc $(INSTANCE)/$(USER_HOME)/workspace/config/
-.PHONY: push-evolve-config
+.PHONY: push-workspace-config
 
 push-ssh-pubkeys:
 	cat $(HOME)/.ssh/*.pub > /tmp/incant-authorized_keys
