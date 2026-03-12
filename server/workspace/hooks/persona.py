@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """persona hook dispatcher."""
 
-import json, sys
+import json, re, sys
 from pathlib import Path
 from typing import Annotated, TypedDict, get_type_hints
 
@@ -38,14 +38,15 @@ def tool(fn):
 def debug(msg):
     print(json.dumps({"log": f"[{AVATAR}] {msg}"}), flush=True)
 
-# trait visibility: ALLCAPS.ext = inlined in system prompt,
-# lowercase.ext = listed (read on demand), .hidden.ext = unlisted
+# trait visibility: ALLCAPS = inlined in system prompt (letters, digits, _, .),
+# lowercase = listed (read on demand), .hidden = unlisted
 def is_hidden(name):
     return name.startswith(".")
 
 def is_core(name):
     stem = Path(name).stem
-    return stem == stem.upper() and stem.replace("_", "").isalpha()
+    stripped = re.sub(r"[_.0-9]", "", stem)
+    return stem == stem.upper() and len(stripped) > 0 and stripped.isalpha()
 
 def trait_names(include_hidden=False):
     return sorted(

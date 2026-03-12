@@ -138,6 +138,20 @@ try:
     for f in ("CORE.md", "notes.md", ".secret.md"):
         os.remove(os.path.join(tmp, "traits", f))
 
+    # --- mutate_request core detection with non-alpha chars ---
+
+    open(os.path.join(tmp, "traits", "V2_PLAN.md"), "w").write("v2 plan content")
+    open(os.path.join(tmp, "traits", "MY.TRAIT.txt"), "w").write("my trait content")
+
+    r, _, _ = call_hook(hook, "mutate_request")
+    system_text = "\n".join(r.get("system", []))
+    check("request inlines ALLCAPS with digits+underscore", "v2 plan content" in system_text)
+    check("request inlines ALLCAPS with dots+any ext", "my trait content" in system_text)
+    check("request does not list ALLCAPS digit trait", "V2_PLAN.md" not in system_text.split("additional traits")[-1] if "additional traits" in system_text else True)
+
+    for f in ("V2_PLAN.md", "MY.TRAIT.txt"):
+        os.remove(os.path.join(tmp, "traits", f))
+
     # --- heartbeat ---
 
     r, logs, _ = call_hook(hook, "heartbeat")
@@ -182,6 +196,8 @@ try:
     open(os.path.join(tmp, "traits", "CORE.md"), "w").write("a")
     open(os.path.join(tmp, "traits", "notes.md"), "w").write("b")
     open(os.path.join(tmp, "traits", ".hidden.md"), "w").write("c")
+    open(os.path.join(tmp, "traits", "V2_PLAN.md"), "w").write("d")
+    open(os.path.join(tmp, "traits", "MY.TRAIT.txt"), "w").write("e")
 
     r, logs, _ = call_tool(hook, "trait_list")
     check("trait_list returns result key", has_key(r, "result"))
@@ -190,6 +206,8 @@ try:
     check("trait_list includes core", "CORE.md" in r["result"])
     check("trait_list includes lowercase", "notes.md" in r["result"])
     check("trait_list excludes hidden", ".hidden.md" not in r["result"])
+    check("trait_list includes digits+underscore core", "V2_PLAN.md" in r["result"])
+    check("trait_list includes dot-stem any-ext core", "MY.TRAIT.txt" in r["result"])
     check("trait_list logs tool name", any("tool=trait_list" in l for l in logs))
 
     r, _, _ = call_tool(hook, "trait_list", {"include_hidden": "true"})
@@ -203,7 +221,7 @@ try:
     r, _, _ = call_tool(hook, "trait_list", {"include_hidden": False})
     check("trait_list bool false excludes hidden", ".hidden.md" not in r["result"])
 
-    for f in ("CORE.md", "notes.md", ".hidden.md"):
+    for f in ("CORE.md", "notes.md", ".hidden.md", "V2_PLAN.md", "MY.TRAIT.txt"):
         os.remove(os.path.join(tmp, "traits", f))
 
     # --- trait_read + format_trait contract ---

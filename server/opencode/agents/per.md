@@ -43,7 +43,7 @@ permission:
         "browser-use extract*": deny
         #"browser-use install*": ask
         "browser-use sessions": allow
-        "browser-use close": ask
+        #"browser-use close": ask
         "browser-use state": allow
         #"browser-use cookies*": ask
         "browser-use back": allow
