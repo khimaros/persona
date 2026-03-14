@@ -44,7 +44,8 @@ def has_value(result, key, substring):
 
 # --- setup ---
 
-workspace = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+workspace = os.environ.get("OPENCODE_EVOLVE_WORKSPACE",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 tmp = tempfile.mkdtemp()
 
 try:
