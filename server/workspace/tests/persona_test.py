@@ -473,6 +473,50 @@ try:
     })
     check("tool_after with history ok", not has_key(r, "error"))
 
+    # --- path traversal ---
+
+    traversal_paths = ["../hooks/persona.py", "../../etc/passwd", "foo/../../bar.md"]
+
+    for bad in traversal_paths:
+        r, _, _ = call_tool(hook, "trait_read", {"trait": bad})
+        check(f"trait_read rejects traversal ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+              f"got: {r.get('result', '')}")
+
+        r, _, _ = call_tool(hook, "trait_write", {"trait": bad, "content": "pwned"})
+        check(f"trait_write rejects traversal ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+              f"got: {r.get('result', '')}")
+        # verify no file was written at the traversal target
+        target = os.path.normpath(os.path.join(tmp, "traits", bad))
+        if os.path.exists(target):
+            check(f"trait_write did not modify outside traits ({bad})",
+                  open(target).read() != "pwned", f"file at {target} was overwritten")
+        else:
+            check(f"trait_write did not write outside traits ({bad})", True)
+
+        r, _, _ = call_tool(hook, "trait_patch", {"trait": bad, "old_string": "x", "new_string": "y"})
+        check(f"trait_patch rejects traversal ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+              f"got: {r.get('result', '')}")
+
+        open(os.path.join(tmp, "traits", "SAFE.md"), "w").write("safe")
+        r, _, _ = call_tool(hook, "trait_delete", {"trait": bad})
+        check(f"trait_delete rejects traversal ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+              f"got: {r.get('result', '')}")
+
+        r, _, _ = call_tool(hook, "trait_move", {"old_trait": "SAFE.md", "new_trait": bad})
+        check(f"trait_move rejects traversal dst ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+              f"got: {r.get('result', '')}")
+
+        r, _, _ = call_tool(hook, "trait_move", {"old_trait": bad, "new_trait": "SAFE2.md"})
+        check(f"trait_move rejects traversal src ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+              f"got: {r.get('result', '')}")
+
+        os.remove(os.path.join(tmp, "traits", "SAFE.md"))
+
+    # absolute path traversal
+    r, _, _ = call_tool(hook, "trait_write", {"trait": "/etc/passwd", "content": "pwned"})
+    check("trait_write rejects absolute path", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+          f"got: {r.get('result', '')}")
+
 finally:
     shutil.rmtree(tmp)
 

@@ -60,6 +60,13 @@ def core_trait_names():
 def listed_trait_names():
     return [n for n in trait_names() if not is_core(n)]
 
+def trait_path(name):
+    """resolve trait name to path, rejecting traversal outside TRAITS/."""
+    resolved = (TRAITS / name).resolve()
+    if not resolved.parts or not str(resolved).startswith(str(TRAITS.resolve())):
+        raise ValueError(f"invalid trait path: {name}")
+    return resolved
+
 def prompt_path(name):
     return PROMPTS / f"{name}.md"
 
@@ -68,7 +75,7 @@ def prompt_names():
 
 def format_trait(name):
     try:
-        content = (TRAITS / name).read_text()
+        content = trait_path(name).read_text()
     except FileNotFoundError:
         content = "(empty)"
     return f"\n{{file:{TRAITS}/{name}}}\n{content}\n"
@@ -98,6 +105,10 @@ def trait_read(
     trait: Annotated[str, "trait filename (e.g. SOUL.md)"],
 ) -> HookResult:
     """read a trait from the persona"""
+    try:
+        trait_path(trait)
+    except ValueError as e:
+        return {"result": f"{AVATAR} invalid trait: {e}"}
     return {"result": f"{AVATAR} {format_trait(trait)}"}
 
 @tool
@@ -106,8 +117,12 @@ def trait_write(
     content: Annotated[str, "full content for the trait"],
 ) -> HookResult:
     """write a trait to the persona"""
+    try:
+        path = trait_path(trait)
+    except ValueError as e:
+        return {"result": f"{AVATAR} invalid trait: {e}"}
     TRAITS.mkdir(parents=True, exist_ok=True)
-    (TRAITS / trait).write_text(content)
+    path.write_text(content)
     return {"result": f"{AVATAR} successfully wrote {trait}", "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
@@ -118,12 +133,16 @@ def trait_patch(
     new_string: Annotated[str, "the new text to replace with"],
 ) -> HookResult:
     """patch a trait in the persona"""
+    try:
+        path = trait_path(trait)
+    except ValueError as e:
+        return {"result": f"{AVATAR} invalid trait: {e}"}
     TRAITS.mkdir(parents=True, exist_ok=True)
-    content = (TRAITS / trait).read_text()
+    content = path.read_text()
     n = content.count(old_string)
     if n != 1:
         return {"result": f"{AVATAR} failed: {'not found' if n == 0 else f'{n} matches'}"}
-    (TRAITS / trait).write_text(content.replace(old_string, new_string, 1))
+    path.write_text(content.replace(old_string, new_string, 1))
     return {"result": f"{AVATAR} successfully patched {trait}", "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
@@ -132,7 +151,10 @@ def trait_delete(
     trait: Annotated[str, "trait filename (e.g. SOUL.md)"],
 ) -> HookResult:
     """delete a trait from the persona"""
-    path = TRAITS / trait
+    try:
+        path = trait_path(trait)
+    except ValueError as e:
+        return {"result": f"{AVATAR} invalid trait: {e}"}
     if not path.exists():
         return {"result": f"{AVATAR} not found: {trait}"}
     path.unlink()
@@ -145,10 +167,13 @@ def trait_move(
     new_trait: Annotated[str, "new trait filename"],
 ) -> HookResult:
     """rename or move a trait in the persona"""
-    src = TRAITS / old_trait
+    try:
+        src = trait_path(old_trait)
+        dst = trait_path(new_trait)
+    except ValueError as e:
+        return {"result": f"{AVATAR} invalid trait: {e}"}
     if not src.exists():
         return {"result": f"{AVATAR} not found: {old_trait}"}
-    dst = TRAITS / new_trait
     if dst.exists():
         return {"result": f"{AVATAR} already exists: {new_trait}"}
     src.rename(dst)
