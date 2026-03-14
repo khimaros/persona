@@ -6,6 +6,7 @@ tools:
     "persona_*": true
     "bash": true
     "read": true
+    "grep": true
     #"write": true
     #"patch": true
     #"glob": true
@@ -26,6 +27,10 @@ permission:
         "*": deny
         "~/workspace/**": allow
         "~/.config/opencode/**": allow
+    "grep": allow
+    #"grep":
+        #"*": deny
+        #"~/workspace/*": allow
     "read":
         "*": deny
         #"~/workspace/*": ask
@@ -43,7 +48,7 @@ permission:
         "browser-use extract*": deny
         #"browser-use install*": ask
         "browser-use sessions": allow
-        #"browser-use close": ask
+        "browser-use close": deny
         "browser-use state": allow
         #"browser-use cookies*": ask
         "browser-use back": allow
