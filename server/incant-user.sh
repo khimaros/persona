@@ -5,7 +5,8 @@ set -xeuo pipefail
 npm config set prefix ~/.local
 
 # install opencode
-npm -g install opencode-ai@latest
+npm -g install "opencode-ai@v1.2.24"
+
 #nix --extra-experimental-features nix-command --extra-experimental-features flakes profile add github:khimaros/opencode
 #[[ -d "opencode" ]] || git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
 #pushd opencode
