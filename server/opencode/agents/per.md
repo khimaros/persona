@@ -46,6 +46,7 @@ permission:
         "browser-use init*": deny
         "browser-use run*": deny
         "browser-use extract*": deny
+        "browser-use python*": deny
         #"browser-use install*": ask
         "browser-use sessions": allow
         "browser-use close": deny
