@@ -12,6 +12,6 @@
   },
   "plugin": [
     "opencode-gemini-auth@latest",
-    "opencode-evolve"
+    "file:///home/persona/.config/opencode/plugins.ts"
   ]
 }

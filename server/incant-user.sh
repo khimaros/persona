@@ -17,9 +17,9 @@ npm -g install "opencode-ai@latest"
 #cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
 #popd
 
-# install opencode-evolve
+# install opencode plugins
 pushd ~/.config/opencode
-npm install --legacy-peer-deps github:khimaros/opencode-evolve
+npm install --legacy-peer-deps github:khimaros/opencode-evolve github:khimaros/opencode-bridge
 popd
 
 # install browser-use

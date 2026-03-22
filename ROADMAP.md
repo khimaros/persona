@@ -1,12 +1,9 @@
 # ROADMAP
 
 ```
-[ ] move tests into workspace/
-[ ] heartbeat sessions should occasionally be reset (size based? every turn?)
 [ ] switch browser-use open --new-tab to separate new-tab and open calls (code and skill)
 [ ] allow pushing dev branch of browser-use manually into guest
 [@] enable default ask and whitelist allow for browser-use
-[x] extract opencode-evolve plugin package
 
 [ ] create tools for editing agents/per.md frontmatter
     [ ] permission_add("bash", "cat /etc/*", "ask")
@@ -21,6 +18,9 @@
 [ ] speech-to-text and text-to-speech for chats
 [ ] install forked opencode-ai
 
+[x] extract opencode-evolve plugin package
+[x] move tests into workspace/
+[x] heartbeat sessions should occasionally be reset (size based? every turn?)
 [x] hook-based plugin architecture (Python hooks, TS shim, IPC via subprocess)
 [x] dynamic tool discovery and invocation (discover_tools + invoke_tool)
 [x] builtin hook/prompt editing tools with test validation (write/patch_hook, write/patch_prompt)

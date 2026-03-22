@@ -45,6 +45,9 @@ clear-workspace:
 	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/workspace/
 .PHONY: clear-workspace
 
+push: update push-opencode-providers push-workspace-config push-workspace-tests service-restart
+.PHONY: push
+
 push-workspace:
 	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
 .PHONY: push-workspace
@@ -59,6 +62,7 @@ push-workspace-hooks:
 
 push-workspace-config:
 	incus file push --recursive ./workspace/config/evolve.jsonc $(INSTANCE)/$(USER_HOME)/workspace/config/
+	incus file push --recursive ./workspace/config/bridge.jsonc $(INSTANCE)/$(USER_HOME)/workspace/config/
 .PHONY: push-workspace-config
 
 push-ssh-pubkeys:
@@ -70,6 +74,11 @@ push-ssh-pubkeys:
 push-opencode-auth:
 	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 $(HOME)/.local/share/opencode/auth.json $(INSTANCE)/$(USER_HOME)/.local/share/opencode/
 .PHONY: push-opencode-auth
+
+push-matrix-auth:
+	@echo "MATRIX_ACCESS_TOKEN=$(MATRIX_ACCESS_TOKEN)" > /tmp/incant-bridge-env
+	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 /tmp/incant-bridge-env $(INSTANCE)/$(USER_HOME)/.config/opencode/bridge.env; rm /tmp/incant-bridge-env
+.PHONY: push-matrix-auth
 
 push-opencode-providers:
 	ssh $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.config/opencode/skills/opencode-operate/scripts/update-opencode-models --api-base $(API_BASE)
@@ -122,8 +131,13 @@ forward-port:
 
 console:
 	@clear
-	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -f
+	@ssh -t $(USER_NAME)@$(ADDRESS) -- "journalctl --user -u opencode -o cat -g '^\\[(evolve|bridge)\\]:' -f"
 .PHONY: console
+
+console-opencode:
+	@clear
+	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -f
+.PHONY: console-opencode
 
 console-evolve:
 	@clear
@@ -134,3 +148,13 @@ console-persona:
 	@clear
 	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -g '^\\[evolve\\]:\ \\[🌀\\]' -f
 .PHONY: console-persona
+
+console-bridge:
+	@clear
+	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -g '^\\[bridge\\]:' -f
+.PHONY: console-bridge
+
+console-startup:
+	@clear
+	@ssh -t $(USER_NAME)@$(ADDRESS) -- "journalctl --user -u opencode -o cat -g '(plugin|bun|install|loading)' -f"
+.PHONY: console-startup
