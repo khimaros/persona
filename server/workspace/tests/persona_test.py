@@ -710,6 +710,20 @@ try:
                                                "due": "2026-04-01T00:00:00+00:00"})
     check("task_create with due", "created task" in r["result"])
 
+    # --- task_create with description ---
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "described task",
+                                               "description": "detailed info about this task"})
+    check("task_create with description", "created task" in r["result"])
+    desc_id = r["result"].split("created task ")[1].split(":")[0].strip()
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_create stores description", data[desc_id].get("description") == "detailed info about this task")
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "no desc task"})
+    no_desc_id = r["result"].split("created task ")[1].split(":")[0].strip()
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_create without description omits key", "description" not in data[no_desc_id])
+
     # --- task_create due validation ---
 
     r, _, _ = call_tool(hook, "task_create", {"title": "bad due", "due": "2026-04-01"})
@@ -738,6 +752,25 @@ try:
     recur_id = r["result"].split("created task ")[1].split(":")[0].strip()
     data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
     check("task_create stores interval", data[recur_id].get("interval") == "P7D")
+
+    # --- task_read ---
+
+    r, _, _ = call_tool(hook, "task_read", {"id": desc_id})
+    check("task_read succeeds", desc_id in r["result"])
+    check("task_read shows title", "described task" in r["result"])
+    check("task_read shows description", "detailed info about this task" in r["result"])
+    check("task_read shows status", "open" in r["result"])
+    check("task_read shows created", "created:" in r["result"])
+
+    r, _, _ = call_tool(hook, "task_read", {"id": no_desc_id})
+    check("task_read without description", "no desc task" in r["result"])
+
+    r, _, _ = call_tool(hook, "task_read", {"id": "nonexistent-uuid"})
+    check("task_read not found", "not found" in r["result"])
+
+    # clean up extra tasks for subsequent count checks
+    call_tool(hook, "task_delete", {"id": desc_id})
+    call_tool(hook, "task_delete", {"id": no_desc_id})
 
     # --- task_list ---
 
@@ -790,6 +823,15 @@ try:
               f"got: {new_task['due']}")
         check("task_update recurring new has interval", new_task.get("interval") == "P7D")
         check("task_update recurring new title preserved", new_task["title"] == "recurring task")
+        check("task_update recurring new description preserved",
+              new_task.get("description") == data[recur_id].get("description"))
+
+    # --- task_update description ---
+
+    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "description": "added a description"})
+    check("task_update description", "updated task" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_update description stored", data[task_id].get("description") == "added a description")
 
     # --- task_update add interval to existing ---
 
@@ -852,7 +894,7 @@ try:
     names = [t["name"] for t in r["tools"]]
     for expected in ("data_read", "data_update", "data_delete", "data_append",
                      "record_append", "record_list", "record_search", "record_count",
-                     "task_list", "task_create", "task_update", "task_delete",
+                     "task_list", "task_read", "task_create", "task_update", "task_delete",
                      "journal_append", "journal_list", "journal_search", "journal_count"):
         check(f"discover includes {expected}", expected in names, f"got: {names}")
 

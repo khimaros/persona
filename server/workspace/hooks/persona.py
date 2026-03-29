@@ -523,8 +523,34 @@ def task_list(
         return {"result": f"{AVATAR} error: {e}"}
 
 @tool
+def task_read(
+    id: Annotated[str, "task UUID"],
+) -> HookResult:
+    """read full details of a task by UUID, including description"""
+    try:
+        tasks = load_tasks()
+        if id not in tasks:
+            return {"result": f"{AVATAR} not found: {id}"}
+        t = tasks[id]
+        lines = [f"  id: {id}"]
+        lines.append(f"  title: {t.get('title', '?')}")
+        lines.append(f"  status: {t.get('status', '?')}")
+        if t.get("description"):
+            lines.append(f"  description: {t['description']}")
+        if t.get("due"):
+            lines.append(f"  due: {t['due']}")
+        if t.get("interval"):
+            lines.append(f"  interval: {t['interval']}")
+        lines.append(f"  created: {t.get('created', '?')}")
+        lines.append(f"  updated: {t.get('updated', '?')}")
+        return {"result": f"{AVATAR} task:\n" + "\n".join(lines)}
+    except (ValueError, FileNotFoundError) as e:
+        return {"result": f"{AVATAR} error: {e}"}
+
+@tool
 def task_create(
     title: Annotated[str, "task title"],
+    description: Annotated[str, param("detailed task description", optional=True)] = "",
     status: Annotated[str, param("task status (default: open)", optional=True)] = "open",
     due: Annotated[str, param(f"due date as {ISO_DT_DESC}", optional=True)] = "",
     interval: Annotated[str, param(f"recurrence as {ISO_DUR_DESC}. when a recurring task is marked done, a new task is auto-created with due bumped by this interval", optional=True)] = "",
@@ -543,6 +569,8 @@ def task_create(
         task_id = str(uuid.uuid4())
         now = format_iso(datetime.now(timezone.utc))
         task = {"title": title, "status": status, "created": now, "updated": now}
+        if description:
+            task["description"] = description
         if due:
             task["due"] = due
         if interval:
@@ -558,6 +586,7 @@ def task_create(
 def task_update(
     id: Annotated[str, "task UUID"],
     title: Annotated[str, param("new title", optional=True)] = "",
+    description: Annotated[str, param("new description", optional=True)] = "",
     status: Annotated[str, param("new status. when a recurring task is set to done, a new task is auto-created with due bumped by its interval", optional=True)] = "",
     due: Annotated[str, param(f"new due date as {ISO_DT_DESC}", optional=True)] = "",
     interval: Annotated[str, param(f"recurrence as {ISO_DUR_DESC}. requires due", optional=True)] = "",
@@ -577,6 +606,8 @@ def task_update(
             tasks[id]["interval"] = interval
         if title:
             tasks[id]["title"] = title
+        if description:
+            tasks[id]["description"] = description
         if status:
             tasks[id]["status"] = status
         tasks[id]["updated"] = format_iso(datetime.now(timezone.utc))
@@ -595,6 +626,8 @@ def task_update(
                 "created": now,
                 "updated": now,
             }
+            if tasks[id].get("description"):
+                new_task["description"] = tasks[id]["description"]
             tasks[new_id] = new_task
             save_tasks(tasks)
             return {"result": f"{AVATAR} completed task {id}, next recurrence: {new_id} (due: {format_iso(new_due)})",
