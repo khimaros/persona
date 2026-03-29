@@ -12,17 +12,66 @@ npm config set prefix ~/.local
 #npm -g install "opencode-ai@latest"
 [[ -d "opencode" ]] || git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
 pushd opencode
-git pull
-npm -g install bun
-bun install
-./packages/opencode/script/build.ts --single
-cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
+OLD_HEAD=$(git rev-parse HEAD)
+git fetch origin
+git reset --hard origin/dev
+if [[ "$(git rev-parse HEAD)" != "$OLD_HEAD" ]]; then
+  npm -g install bun
+  bun install
+  ./packages/opencode/script/build.ts --single
+  systemctl --user stop opencode.service || true
+  cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
+fi
 popd
 
-# install opencode plugins
+# install opencode plugins, using local @opencode-ai/plugin from the build
+# to avoid fetching the unpublished dev version from npm.
+#
+# opencode's needsInstall() skips bun install when:
+#   1. node_modules/@opencode-ai/plugin exists
+#   2. package.json has @opencode-ai/plugin == Installation.VERSION
+# so we pre-seed both to prevent the startup install from hitting npm.
+OPENCODE_DEV_VERSION=$(~/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode --version)
+
+# strip @opencode-ai/plugin from package.json so npm install doesn't try to fetch it
+for dir in ~/.config/opencode ~/.opencode; do
+  [[ -f "$dir/package.json" ]] && node -e "
+    const fs = require('fs');
+    const f = '$dir/package.json';
+    const p = JSON.parse(fs.readFileSync(f));
+    delete (p.dependencies || {})['@opencode-ai/plugin'];
+    fs.writeFileSync(f, JSON.stringify(p, null, 2));
+  "
+done
+
 pushd ~/.config/opencode
 npm install --legacy-peer-deps github:khimaros/opencode-evolve github:khimaros/opencode-bridge
 popd
+
+# copy local @opencode-ai/plugin and stamp package.json with the dev version
+# so opencode's needsInstall() is satisfied at startup
+seed_plugin() {
+  local dir="$1"
+  mkdir -p "$dir/node_modules/@opencode-ai"
+  for pkg in plugin sdk; do
+    rm -rf "$dir/node_modules/@opencode-ai/$pkg"
+    cp -rL ~/opencode/node_modules/@opencode-ai/$pkg "$dir/node_modules/@opencode-ai/$pkg"
+  done
+  node -e "
+    const fs = require('fs');
+    const mf = '$dir/node_modules/@opencode-ai/plugin/package.json';
+    const m = JSON.parse(fs.readFileSync(mf));
+    m.version = '$OPENCODE_DEV_VERSION';
+    fs.writeFileSync(mf, JSON.stringify(m, null, 2));
+    const pf = '$dir/package.json';
+    const p = fs.existsSync(pf) ? JSON.parse(fs.readFileSync(pf)) : {};
+    p.dependencies = p.dependencies || {};
+    p.dependencies['@opencode-ai/plugin'] = '$OPENCODE_DEV_VERSION';
+    fs.writeFileSync(pf, JSON.stringify(p, null, 2));
+  "
+}
+seed_plugin ~/.config/opencode
+seed_plugin ~/.opencode
 
 # install uv
 #cargo install --locked uv
