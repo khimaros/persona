@@ -31,7 +31,7 @@ popd
 #   1. node_modules/@opencode-ai/plugin exists
 #   2. package.json has @opencode-ai/plugin == Installation.VERSION
 # so we pre-seed both to prevent the startup install from hitting npm.
-OPENCODE_DEV_VERSION=$(~/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode --version)
+OPENCODE_VERSION=$(~/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode --version)
 
 # strip @opencode-ai/plugin from package.json so npm install doesn't try to fetch it
 for dir in ~/.config/opencode ~/.opencode; do
@@ -45,7 +45,8 @@ for dir in ~/.config/opencode ~/.opencode; do
 done
 
 pushd ~/.config/opencode
-npm install --legacy-peer-deps github:khimaros/opencode-evolve github:khimaros/opencode-bridge
+#npm install -U --legacy-peer-deps github:khimaros/opencode-evolve github:khimaros/opencode-bridge
+npm install -U github:khimaros/opencode-evolve github:khimaros/opencode-bridge
 popd
 
 # copy local @opencode-ai/plugin and stamp package.json with the dev version
@@ -61,12 +62,12 @@ seed_plugin() {
     const fs = require('fs');
     const mf = '$dir/node_modules/@opencode-ai/plugin/package.json';
     const m = JSON.parse(fs.readFileSync(mf));
-    m.version = '$OPENCODE_DEV_VERSION';
+    m.version = '$OPENCODE_VERSION';
     fs.writeFileSync(mf, JSON.stringify(m, null, 2));
     const pf = '$dir/package.json';
     const p = fs.existsSync(pf) ? JSON.parse(fs.readFileSync(pf)) : {};
     p.dependencies = p.dependencies || {};
-    p.dependencies['@opencode-ai/plugin'] = '$OPENCODE_DEV_VERSION';
+    p.dependencies['@opencode-ai/plugin'] = '$OPENCODE_VERSION';
     fs.writeFileSync(pf, JSON.stringify(p, null, 2));
   "
 }
