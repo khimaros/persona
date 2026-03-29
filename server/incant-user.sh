@@ -12,16 +12,13 @@ npm config set prefix ~/.local
 #npm -g install "opencode-ai@latest"
 [[ -d "opencode" ]] || git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
 pushd opencode
-OLD_HEAD=$(git rev-parse HEAD)
 git fetch origin
 git reset --hard origin/dev
-if [[ "$(git rev-parse HEAD)" != "$OLD_HEAD" ]]; then
-  npm -g install bun
-  bun install
-  ./packages/opencode/script/build.ts --single
-  systemctl --user stop opencode.service || true
-  cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
-fi
+npm -g install bun
+bun install
+./packages/opencode/script/build.ts --single
+systemctl --user stop opencode.service || true
+cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
 popd
 
 # install opencode plugins, using local @opencode-ai/plugin from the build
