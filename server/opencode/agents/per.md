@@ -9,7 +9,7 @@ tools:
     "grep": true
     #"write": true
     #"patch": true
-    #"glob": true
+    "glob": true
     "skill": true
     #"websearch": true
     #"webfetch": true
@@ -27,21 +27,25 @@ permission:
         "*": deny
         "~/workspace/**": allow
         "~/.config/opencode/**": allow
+    "glob": allow
     "grep": allow
     #"grep":
         #"*": deny
         #"~/workspace/*": allow
     "read":
         "*": deny
-        #"~/workspace/*": ask
-        "~/workspace/config/*": allow
-        "~/workspace/tests/*": allow
-        "~/workspace/README.md": allow
+        "~/workspace/**": allow
+        #"~/workspace/config/*": allow
+        #"~/workspace/tests/*": allow
         "~/.config/opencode/opencode.jsonc": allow
         "~/.config/opencode/agents/per.md": allow
+        "~/.config/opencode/node_modules/opencode-bridge/README.md": allow
+        "~/.config/opencode/node_modules/opencode-evolve/README.md": allow
+        "~/.config/opencode/node_modules/@opencode-ai/**": allow
     "bash":
         "*": deny
         #"~/workspace/tests/persona_test.py": allow
+        "google-chrome --headless --user-data-dir=* --remote-debugging-port=9222": allow
         "browser-use*": allow
         "browser-use init*": deny
         "browser-use run*": deny

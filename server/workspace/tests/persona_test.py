@@ -73,7 +73,7 @@ try:
     check("discover returns tools key", has_key(r, "tools"))
     check("discover has no typo keys", not has_key(r, "tool"))
     names = [t["name"] for t in r["tools"]]
-    for expected in ("trait_list", "trait_read", "trait_write", "trait_patch", "tool_discover", "tool_invoke"):
+    for expected in ("trait_list", "trait_read", "trait_write", "trait_edit", "tool_discover", "tool_invoke"):
         check(f"discover includes {expected}", expected in names, f"got: {names}")
     check("discover returns at least 6 tools", len(r["tools"]) >= 6, f"got: {len(r['tools'])}")
     check("discover logs tool names", any("tools:" in l for l in logs))
@@ -81,7 +81,7 @@ try:
     # --- discover tool parameter schemas ---
 
     tools_by_name = {t["name"]: t for t in r["tools"]}
-    expected_counts = {"trait_list": 1, "trait_read": 1, "trait_write": 2, "trait_patch": 3}
+    expected_counts = {"trait_list": 1, "trait_read": 1, "trait_write": 2, "trait_edit": 4}
     for name, count in expected_counts.items():
         actual = len(tools_by_name[name]["parameters"])
         check(f"{name} has {count} params", actual == count, f"got: {actual}")
@@ -258,24 +258,24 @@ try:
     content = open(os.path.join(tmp, "traits", "NEW.md")).read()
     check("trait_write wrote file", content == "hello world")
 
-    # --- trait_patch ---
+    # --- trait_edit ---
 
     open(os.path.join(tmp, "traits", "PATCH.md"), "w").write("old text here")
 
-    r, _, _ = call_tool(hook, "trait_patch", {"trait": "PATCH.md", "old_string": "old text", "new_string": "new text"})
-    check("trait_patch returns result key", has_key(r, "result"))
-    check("trait_patch result is str", isinstance(r.get("result"), str), f"got: {type(r.get('result')).__name__}")
-    check("trait_patch returns success", "successfully patched" in r["result"])
-    check("trait_patch reports modified", has_key(r, "modified"))
+    r, _, _ = call_tool(hook, "trait_edit", {"trait": "PATCH.md", "oldString": "old text", "newString": "new text"})
+    check("trait_edit returns result key", has_key(r, "result"))
+    check("trait_edit result is str", isinstance(r.get("result"), str), f"got: {type(r.get('result')).__name__}")
+    check("trait_edit returns success", "successfully edited" in r["result"])
+    check("trait_edit reports modified", has_key(r, "modified"))
     content = open(os.path.join(tmp, "traits", "PATCH.md")).read()
-    check("trait_patch updated file", content == "new text here")
+    check("trait_edit updated file", content == "new text here")
 
-    r, _, _ = call_tool(hook, "trait_patch", {"trait": "PATCH.md", "old_string": "nonexistent", "new_string": "x"})
-    check("trait_patch not found", "not found" in r["result"])
+    r, _, _ = call_tool(hook, "trait_edit", {"trait": "PATCH.md", "oldString": "nonexistent", "newString": "x"})
+    check("trait_edit not found", "not found" in r["result"])
 
     open(os.path.join(tmp, "traits", "DUP.md"), "w").write("aaa")
-    r, _, _ = call_tool(hook, "trait_patch", {"trait": "DUP.md", "old_string": "a", "new_string": "b"})
-    check("trait_patch multiple matches fails", "3 matches" in r["result"])
+    r, _, _ = call_tool(hook, "trait_edit", {"trait": "DUP.md", "oldString": "a", "newString": "b"})
+    check("trait_edit multiple matches fails", "3 matches" in r["result"])
 
     # --- trait_delete ---
 
@@ -354,9 +354,9 @@ try:
     check("trait_write notify has trait_changed", any(n.get("type") == "trait_changed" for n in r.get("notify", [])))
     check("trait_write notify includes file", any("NOTIFY.md" in n.get("files", []) for n in r.get("notify", [])))
 
-    r, _, _ = call_tool(hook, "trait_patch", {"trait": "NOTIFY.md", "old_string": "updated", "new_string": "patched"})
-    check("trait_patch returns notify", has_key(r, "notify"))
-    check("trait_patch notify has trait_changed", any(n.get("type") == "trait_changed" for n in r.get("notify", [])))
+    r, _, _ = call_tool(hook, "trait_edit", {"trait": "NOTIFY.md", "oldString": "updated", "newString": "patched"})
+    check("trait_edit returns notify", has_key(r, "notify"))
+    check("trait_edit notify has trait_changed", any(n.get("type") == "trait_changed" for n in r.get("notify", [])))
 
     r, _, _ = call_tool(hook, "trait_move", {"old_trait": "NOTIFY.md", "new_trait": "NOTIFY2.md"})
     check("trait_move returns notify", has_key(r, "notify"))
@@ -493,8 +493,8 @@ try:
         else:
             check(f"trait_write did not write outside traits ({bad})", True)
 
-        r, _, _ = call_tool(hook, "trait_patch", {"trait": bad, "old_string": "x", "new_string": "y"})
-        check(f"trait_patch rejects traversal ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
+        r, _, _ = call_tool(hook, "trait_edit", {"trait": bad, "oldString": "x", "newString": "y"})
+        check(f"trait_edit rejects traversal ({bad})", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
               f"got: {r.get('result', '')}")
 
         open(os.path.join(tmp, "traits", "SAFE.md"), "w").write("safe")
@@ -516,6 +516,306 @@ try:
     r, _, _ = call_tool(hook, "trait_write", {"trait": "/etc/passwd", "content": "pwned"})
     check("trait_write rejects absolute path", "error" in r.get("result", "").lower() or "invalid" in r.get("result", "").lower(),
           f"got: {r.get('result', '')}")
+
+    # --- data_read ---
+
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"a": 1, "b": {"c": [10, 20, 30]}}')
+
+    r, _, _ = call_tool(hook, "data_read", {"trait": ".test.json"})
+    check("data_read returns full object", '"a": 1' in r["result"])
+
+    r, _, _ = call_tool(hook, "data_read", {"trait": ".test.json", "key": "a"})
+    check("data_read key selector", "1" in r["result"])
+
+    r, _, _ = call_tool(hook, "data_read", {"trait": ".test.json", "key": "b.c"})
+    check("data_read nested selector", "10" in r["result"] and "20" in r["result"] and "30" in r["result"])
+
+    r, _, _ = call_tool(hook, "data_read", {"trait": ".test.json", "key": "b.c.1"})
+    check("data_read array index", "20" in r["result"])
+
+    r, _, _ = call_tool(hook, "data_read", {"trait": "noext"})
+    check("data_read rejects non-.json", "error" in r["result"].lower())
+
+    r, _, _ = call_tool(hook, "data_read", {"trait": ".missing.json"})
+    check("data_read missing file", "error" in r["result"].lower())
+
+    # --- data_update ---
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "a", "value": 42})
+    check("data_update sets value", "successfully updated" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update value correct", data["a"] == 42)
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "b.c.0", "value": 99})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update nested array index", data["b"]["c"][0] == 99)
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "new_key", "value": "hello"})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update creates new key in dict", data.get("new_key") == "hello")
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "x.y.z", "value": 1})
+    check("data_update unreachable key fails", "not reachable" in r["result"])
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "value": {"fresh": True}})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update overwrite whole file", data == {"fresh": True})
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "", "value": {"a": 1}})
+    check("data_update returns modified", has_key(r, "modified"))
+    check("data_update returns notify", has_key(r, "notify"))
+
+    # --- data_delete ---
+
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"x": 1, "y": 2, "arr": [10, 20, 30]}')
+
+    r, _, _ = call_tool(hook, "data_delete", {"trait": ".test.json", "key": "x"})
+    check("data_delete removes key", "successfully deleted" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_delete key gone", "x" not in data)
+    check("data_delete other keys intact", data.get("y") == 2)
+
+    r, _, _ = call_tool(hook, "data_delete", {"trait": ".test.json", "key": "arr.1"})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_delete array index", data["arr"] == [10, 30])
+
+    r, _, _ = call_tool(hook, "data_delete", {"trait": ".test.json", "key": "nonexistent"})
+    check("data_delete missing key fails", "not found" in r["result"])
+
+    # --- data_append ---
+
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"items": [1, 2]}')
+
+    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "key": "items", "value": 3})
+    check("data_append to nested array", "successfully appended" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_append value correct", data["items"] == [1, 2, 3])
+
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('[1, 2]')
+    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "value": 3})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_append to root array", data == [1, 2, 3])
+
+    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "key": "notarray", "value": 1})
+    check("data_append non-array fails", "not an array" in r["result"])
+
+    os.remove(os.path.join(tmp, "traits", ".test.json"))
+
+    # --- record_append + record_list + record_count + record_search ---
+
+    open(os.path.join(tmp, "traits", ".test.jsonl"), "w").write("")
+
+    r, _, _ = call_tool(hook, "record_append", {"trait": ".test.jsonl", "fields": {"type": "note", "content": "hello"}})
+    check("record_append succeeds", "successfully appended" in r["result"])
+    check("record_append returns modified", has_key(r, "modified"))
+
+    r, _, _ = call_tool(hook, "record_append", {"trait": ".test.jsonl", "fields": {"type": "obs", "content": "world"}})
+    check("record_append second entry", "successfully appended" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl"})
+    check("record_list shows all", "2/" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl", "type": "note"})
+    check("record_list filter by type", "1/" in r["result"])
+    check("record_list filter content", "hello" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl", "limit": "1"})
+    check("record_list with limit", "1/2" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl", "limit": "1", "offset": "1"})
+    check("record_list with offset", "world" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_count", {"trait": ".test.jsonl"})
+    check("record_count total", "2 records" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_count", {"trait": ".test.jsonl", "type": "obs"})
+    check("record_count by type", "1 records" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_search", {"trait": ".test.jsonl", "pattern": "hello"})
+    check("record_search finds match", "1 matches" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_search", {"trait": ".test.jsonl", "pattern": "zzz"})
+    check("record_search no match", "0 matches" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_search", {"trait": ".test.jsonl", "pattern": "[invalid"})
+    check("record_search bad regex", "invalid regex" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_append", {"trait": "noext"})
+    check("record_append rejects non-.jsonl", "error" in r["result"].lower())
+
+    os.remove(os.path.join(tmp, "traits", ".test.jsonl"))
+
+    # --- task_create + task_list + task_update + task_delete ---
+
+    open(os.path.join(tmp, "traits", ".tasks.json"), "w").write("{}")
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "test task"})
+    check("task_create succeeds", "created task" in r["result"])
+    check("task_create returns modified", has_key(r, "modified"))
+    # extract uuid from result
+    task_id = r["result"].split("created task ")[1].split(":")[0].strip()
+    check("task_create uuid format", len(task_id) == 36 and task_id.count("-") == 4,
+          f"got: {task_id}")
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "due task", "status": "blocked",
+                                               "due": "2026-04-01T00:00:00+00:00"})
+    check("task_create with due", "created task" in r["result"])
+
+    # --- task_create due validation ---
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "bad due", "due": "2026-04-01"})
+    check("task_create rejects due without timezone", "error" in r["result"].lower(),
+          f"got: {r['result']}")
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "bad due", "due": "not-a-date"})
+    check("task_create rejects invalid due", "error" in r["result"].lower(),
+          f"got: {r['result']}")
+
+    # --- task_create interval validation ---
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "bad interval", "interval": "P1D"})
+    check("task_create interval requires due", "error" in r["result"].lower(),
+          f"got: {r['result']}")
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "bad interval", "due": "2026-04-01T00:00:00+00:00",
+                                               "interval": "bad"})
+    check("task_create rejects invalid interval", "error" in r["result"].lower(),
+          f"got: {r['result']}")
+
+    r, _, _ = call_tool(hook, "task_create", {"title": "recurring task",
+                                               "due": "2026-04-01T09:00:00+00:00",
+                                               "interval": "P7D"})
+    check("task_create with interval", "created task" in r["result"])
+    recur_id = r["result"].split("created task ")[1].split(":")[0].strip()
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_create stores interval", data[recur_id].get("interval") == "P7D")
+
+    # --- task_list ---
+
+    r, _, _ = call_tool(hook, "task_list")
+    check("task_list shows all", "3 tasks" in r["result"])
+    check("task_list shows title", "test task" in r["result"])
+
+    r, _, _ = call_tool(hook, "task_list", {"status": "open"})
+    check("task_list filter status", "2 tasks" in r["result"])
+
+    r, _, _ = call_tool(hook, "task_list", {"status": "blocked"})
+    check("task_list filter blocked", "1 tasks" in r["result"])
+    check("task_list shows due", "due:" in r["result"])
+
+    r, _, _ = call_tool(hook, "task_list", {"due_before": "2026-05-01T00:00:00+00:00"})
+    check("task_list filter due_before", "2 tasks" in r["result"])
+
+    r, _, _ = call_tool(hook, "task_list")
+    check("task_list shows interval", "every P7D" in r["result"])
+
+    # --- task_update ---
+
+    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "status": "done"})
+    check("task_update succeeds", "updated task" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_update status changed", data[task_id]["status"] == "done")
+    check("task_update has updated timestamp", "updated" in data[task_id])
+
+    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "due": "no-tz"})
+    check("task_update rejects due without timezone", "error" in r["result"].lower(),
+          f"got: {r['result']}")
+
+    r, _, _ = call_tool(hook, "task_update", {"id": "nonexistent-uuid"})
+    check("task_update not found", "not found" in r["result"])
+
+    # --- task_update recurrence ---
+
+    r, _, _ = call_tool(hook, "task_update", {"id": recur_id, "status": "done"})
+    check("task_update recurring creates next", "next recurrence" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_update recurring marks done", data[recur_id]["status"] == "done")
+    # find the new recurring task (open, with P7D interval, not the original)
+    blocked_id = [k for k in data if data[k].get("status") == "blocked"][0]
+    new_recur = [k for k in data if k not in (task_id, recur_id, blocked_id)
+                 and data[k].get("interval") == "P7D" and data[k]["status"] == "open"]
+    check("task_update recurring new task exists", len(new_recur) == 1, f"got: {new_recur}")
+    if new_recur:
+        new_task = data[new_recur[0]]
+        check("task_update recurring new due bumped", new_task["due"] == "2026-04-08T09:00:00.000Z",
+              f"got: {new_task['due']}")
+        check("task_update recurring new has interval", new_task.get("interval") == "P7D")
+        check("task_update recurring new title preserved", new_task["title"] == "recurring task")
+
+    # --- task_update add interval to existing ---
+
+    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "status": "open",
+                                               "due": "2026-05-01T00:00:00+00:00",
+                                               "interval": "P1M"})
+    check("task_update add interval", "updated task" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_update interval stored", data[task_id].get("interval") == "P1M")
+
+    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "interval": "bad"})
+    check("task_update rejects invalid interval", "error" in r["result"].lower(),
+          f"got: {r['result']}")
+
+    # --- task_delete ---
+
+    r, _, _ = call_tool(hook, "task_delete", {"id": task_id})
+    check("task_delete succeeds", "deleted task" in r["result"])
+    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task_delete removed", task_id not in data)
+
+    r, _, _ = call_tool(hook, "task_delete", {"id": "nonexistent-uuid"})
+    check("task_delete not found", "not found" in r["result"])
+
+    os.remove(os.path.join(tmp, "traits", ".tasks.json"))
+
+    # --- journal_append + journal_list + journal_search + journal_count ---
+
+    open(os.path.join(tmp, "traits", ".journal.jsonl"), "w").write("")
+
+    r, _, _ = call_tool(hook, "journal_append", {"fields": {"type": "thought", "content": "i exist"}})
+    check("journal_append succeeds", "journal entry recorded" in r["result"])
+    check("journal_append returns modified", has_key(r, "modified"))
+
+    r, _, _ = call_tool(hook, "journal_append", {"fields": {"type": "obs", "content": "humans sleep"}})
+
+    r, _, _ = call_tool(hook, "journal_list")
+    check("journal_list shows all", "2/" in r["result"])
+
+    r, _, _ = call_tool(hook, "journal_list", {"type": "thought"})
+    check("journal_list filter type", "1/" in r["result"])
+
+    r, _, _ = call_tool(hook, "journal_count")
+    check("journal_count total", "2 records" in r["result"])
+
+    r, _, _ = call_tool(hook, "journal_search", {"pattern": "exist"})
+    check("journal_search finds match", "1 matches" in r["result"])
+
+    # verify journal entries have timestamps
+    lines = open(os.path.join(tmp, "traits", ".journal.jsonl")).read().strip().splitlines()
+    entry = json.loads(lines[0])
+    check("journal entry has timestamp", "timestamp" in entry)
+    check("journal entry has fields", entry.get("content") == "i exist")
+
+    os.remove(os.path.join(tmp, "traits", ".journal.jsonl"))
+
+    # --- discover includes new tools ---
+
+    r, _, _ = call_hook(hook, "discover")
+    names = [t["name"] for t in r["tools"]]
+    for expected in ("data_read", "data_update", "data_delete", "data_append",
+                     "record_append", "record_list", "record_search", "record_count",
+                     "task_list", "task_create", "task_update", "task_delete",
+                     "journal_append", "journal_list", "journal_search", "journal_count"):
+        check(f"discover includes {expected}", expected in names, f"got: {names}")
+
+    # --- discover typed params ---
+
+    tools_by_name = {t["name"]: t for t in r["tools"]}
+    value_param = tools_by_name["data_update"]["parameters"].get("value", {})
+    check("data_update value param is typed", isinstance(value_param, dict) and value_param.get("type") == "any",
+          f"got: {value_param}")
+    fields_param = tools_by_name["journal_append"]["parameters"].get("fields", {})
+    check("journal_append fields param is typed", isinstance(fields_param, dict) and fields_param.get("type") == "object",
+          f"got: {fields_param}")
 
 finally:
     shutil.rmtree(tmp)

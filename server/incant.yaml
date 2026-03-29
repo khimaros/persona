@@ -19,9 +19,10 @@ persona_template: &persona_instance
       apt -y install vim screen git curl rsync sudo
       apt -y install adduser
       apt -y install npm
-      #apt -y install nix
-      #apt -y install cargo
-      #which opencode || npm install -g opencode-ai@latest
+      if ! which google-chrome; then
+        wget -O chrome.deb "${CHROME_URI}"
+        apt -y install ./chrome.deb
+      fi
     - copy:
         source: ./screenrc
         target: /etc/screenrc

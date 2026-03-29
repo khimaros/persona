@@ -22,10 +22,13 @@ pushd ~/.config/opencode
 npm install --legacy-peer-deps github:khimaros/opencode-evolve github:khimaros/opencode-bridge
 popd
 
-# install browser-use
-type ~/.local/bin/uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+# install uv
 #cargo install --locked uv
-~/.local/bin/uv tool install git+https://github.com/khimaros/browser-use[cli]
+type ~/.local/bin/uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# install browser-use
+#~/.local/bin/uv tool install -U browser-use[cli]
+~/.local/bin/uv tool install -U git+https://github.com/khimaros/browser-use[cli]
 
 # initialize git repo: required to avoid "global" project in "/"
 pushd ~/workspace/

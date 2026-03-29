@@ -9,10 +9,10 @@ which decouples it from OpenCode internals and gives it the ability to self-modi
 
 persona runs fully sandboxed in a VM or container with the help of Incus.
 
-tbe interface (webui and tui) are the stock OpenCode interfaces. all other OpenCode
+the interface (webui and tui) are the stock OpenCode interfaces. all other OpenCode
 plugins, agents, and config are supported natively.
 
-persona has a heartbeat mechanism and a simple default SOUL.md
+persona has a heartbeat mechanism, a simple default SOUL.md, task tracking, and a journal
 
 because it is built on OpenCode it supports most models and providers
 as well as most subscriptions (for now).

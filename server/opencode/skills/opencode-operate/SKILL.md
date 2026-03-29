@@ -61,6 +61,14 @@ Synchronize models from providers to your configuration.
   - Update the provider key and name in `opencode.jsonc` after running the script.
   - Restart the server when asked to use this skill to apply changes.
 
+### 🔑 Matrix Login
+
+Log in to a matrix homeserver and save bridge credentials to `persona.env`.
+
+- **Tool**: `scripts/matrix-login` (prompts for homeserver, username, and password)
+- Updates `BRIDGE_HOMESERVER`, `BRIDGE_USER_ID`, and `BRIDGE_ACCESS_TOKEN` in `persona.env`.
+- Preserves existing env vars and comments. Uncomments commented-out keys if present.
+
 
 ## ⬆️ Service Management
 

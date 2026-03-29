@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""log in to a matrix homeserver and persist credentials to persona.env."""
+
+import argparse
+import getpass
+import json
+import os
+import re
+import sys
+import urllib.request
+import urllib.error
+
+
+ENV_FILE = os.path.join(os.path.dirname(__file__), "../../../persona.env")
+
+
+def matrix_login(homeserver, username, password):
+    """authenticate against the matrix homeserver, return (user_id, access_token)."""
+    url = f"{homeserver.rstrip('/')}/_matrix/client/v3/login"
+    body = json.dumps({
+        "type": "m.login.password",
+        "identifier": {"type": "m.id.user", "user": username},
+        "password": password,
+    }).encode()
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read().decode())
+    return data["user_id"], data["access_token"]
+
+
+def update_env_file(path, values):
+    """update or append key=value pairs in an env file, preserving comments and order."""
+    lines = []
+    if os.path.exists(path):
+        with open(path) as f:
+            lines = f.readlines()
+
+    remaining = dict(values)
+    updated = []
+    for line in lines:
+        # match KEY=value or #KEY=value (commented out)
+        m = re.match(r'^(#?\s*)([A-Z_]+)=', line)
+        if m and m.group(2) in remaining:
+            key = m.group(2)
+            updated.append(f'{key}="{remaining.pop(key)}"\n')
+        else:
+            updated.append(line)
+
+    # append any keys not already present
+    for key, val in remaining.items():
+        updated.append(f'{key}="{val}"\n')
+
+    # ensure trailing newline
+    if updated and not updated[-1].endswith('\n'):
+        updated[-1] += '\n'
+
+    with open(path, 'w') as f:
+        f.writelines(updated)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="log in to matrix and save credentials to persona.env")
+    parser.add_argument("homeserver", nargs="?", help="matrix homeserver URL (e.g. https://matrix.example.org)")
+    parser.add_argument("username", nargs="?", help="matrix username (e.g. bot)")
+    parser.add_argument("password", nargs="?", help="matrix password (prompted if omitted)")
+    parser.add_argument("--env-file", default=ENV_FILE, help="path to env file (default: persona.env)")
+    args = parser.parse_args()
+
+    homeserver = args.homeserver or input("homeserver: ")
+    username = args.username or input("username: ")
+    password = args.password or getpass.getpass("password: ")
+
+    homeserver = homeserver.rstrip('/')
+    print(f"logging in to {homeserver} as {username}...")
+
+    try:
+        user_id, access_token = matrix_login(homeserver, username, password)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"login failed: {e.code} {body}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"login failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"authenticated as {user_id}")
+
+    update_env_file(args.env_file, {
+        "BRIDGE_HOMESERVER": homeserver,
+        "BRIDGE_USER_ID": user_id,
+        "BRIDGE_ACCESS_TOKEN": access_token,
+    })
+
+    print(f"credentials saved to {args.env_file}")
+
+
+if __name__ == "__main__":
+    main()

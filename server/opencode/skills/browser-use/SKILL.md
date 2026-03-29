@@ -12,27 +12,36 @@ Control the browser using the `browser-use` CLI. This tool interacts with elemen
 
 Follow this standard flow to manage browser sessions effectively.
 
-### 1. Check Existing Session
-Run `browser-use sessions` to check for an active "default" session.
-*   **If "default" exists:** Use it immediately. **DO NOT** create a new session.
-*   **If "default" does NOT exist:** Proceed to step 2.
+### BEGIN
+*  EXEC `browser-use sessions` to check for an active "default" session.
+*  IF "default" EXISTS: GOTO BROWSE
+*  ELSE: GOTO SESSION
 
-### 2. Create Session (Headless)
-Start a headless session automatically — do not ask the user.
+### SESSION
+*  EXEC `browser-use --connect state`
+*  IF EXEC FAILS: GOTO HEADLESS
+*  ELSE: GOTO BROWSE
+
+### HEADLESS
+*  Start a headless Chrome instance. EXEC:
 ```bash
-browser-use --user-data-dir ${HOME}/.browser-use/ new-tab
+google-chrome --headless --user-data-dir=${HOME}/.chrome-profile/ --remote-debugging-port=9222`
 ```
-If the user wants a headed (visible) session, they will start one manually before invoking this skill.
+*  GOTO SESSION
 
-### 3. Subsequent Commands
-Once the session is initialized, omit the user data flags. Commands will automatically use the active default session.
+### BROWSE
+*  Continue using the browser to navigate/interact
 ```bash
+# Once the browser-use session is initialized, omit the --connect flag.
+# Commands will automatically use the active default session.
 browser-use open "https://example.com"
 browser-use click 5
 ```
+**IMPORTANT**: if you encounter a captcha with a headed browser,
+STOP and ask the user to respond to the captcha before continuing.
 
-### 4. Persistence
-*   **DO NOT CLOSE** the session unless explicitly requested by the user.
+### PERSISTENCE
+*   **LEAVE THE BROWSER OPEN** unless explicitly requested by the user.
 *   The browser state persists between commands.
 
 ---
@@ -42,8 +51,8 @@ browser-use click 5
 ### Navigation
 | Command | Description |
 | :--- | :--- |
-| `open <url>` | Navigate to a URL in the current tab |
 | `new-tab` | Open a new blank tab |
+| `open <url>` | Navigate to a URL in the current tab |
 | `back` | Go back in history |
 | `switch <tab_id>` | Switch to a specific tab |
 | `close-tab` | Close the current tab |
@@ -52,7 +61,7 @@ browser-use click 5
 | Command | Description |
 | :--- | :--- |
 | `state` | **CRITICAL**: Get current URL, title, and interactive elements with indices |
-| `screenshot` | Take a screenshot of the current page |
+| `screenshot [--full] <path>` | Take a screenshot of the current page |
 | `get` | Get specific information |
 | `cookies` | Perform cookie operations |
 
@@ -88,7 +97,7 @@ browser-use click 5
 
 1.  **Check State Frequently**: Always run `state` before interacting to ensure you have correct element indices, as they change when the page updates.
 2.  **Handling Forms**: Use `input <index> "text"` to fill fields, then `click <index>` or `keys Enter` to submit.
-3.  **Opening URLs**: Use `new-tab` to open a blank tab, then `open <url>` to navigate. To open a URL in the current tab, just use `open <url>` directly.
+3.  **Opening URLs**: Use  `open <url>` to navigate to a URL in the current tab.
 4.  **Troubleshooting**:
-    *   **Empty DOM**: If `state` returns an empty tree, the page is likely loading. Wait and retry.
+    *   **Empty DOM**: If `state` returns an empty tree, the page may be loading. Wait and retry.
     *   **Element not found**: Refresh the indices by running `state` again.

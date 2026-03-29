@@ -75,11 +75,6 @@ push-opencode-auth:
 	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 $(HOME)/.local/share/opencode/auth.json $(INSTANCE)/$(USER_HOME)/.local/share/opencode/
 .PHONY: push-opencode-auth
 
-push-matrix-auth:
-	@echo "MATRIX_ACCESS_TOKEN=$(MATRIX_ACCESS_TOKEN)" > /tmp/incant-bridge-env
-	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 /tmp/incant-bridge-env $(INSTANCE)/$(USER_HOME)/.config/opencode/bridge.env; rm /tmp/incant-bridge-env
-.PHONY: push-matrix-auth
-
 push-opencode-providers:
 	ssh $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.config/opencode/skills/opencode-operate/scripts/update-opencode-models --api-base $(API_BASE)
 .PHONY: push-opencode-providers
@@ -97,8 +92,11 @@ ssh:
 .PHONY: ssh
 
 browser-head:
-	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --session default --headed --user-data-dir $(USER_HOME)/.browser-use/ open about:blank
-	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --session default close
+	#ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --connect state
+	#ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --headed --profile=persona open about:blank
+	#ssh -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --connect state || true
+	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- google-chrome --user-data-dir=${USER_HOME}/.chrome-profile/ --remote-debugging-port=9222
+	ssh -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use close
 .PHONY: browser-head
 
 webui:
