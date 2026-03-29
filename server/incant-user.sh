@@ -2,20 +2,22 @@
 
 set -xeuo pipefail
 
+export PATH="${HOME}/.local/bin:${PATH}"
+
 npm config set prefix ~/.local
 
 # install opencode
-#npm -g install "opencode-ai@v1.2.26"
-npm -g install "opencode-ai@latest"
-
 #nix --extra-experimental-features nix-command --extra-experimental-features flakes profile add github:khimaros/opencode
-#[[ -d "opencode" ]] || git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
-#pushd opencode
-#npm -g install bun
-#bun install
-#./packages/opencode/script/build.ts --single
-#cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
-#popd
+#npm -g install "opencode-ai@v1.2.26"
+#npm -g install "opencode-ai@latest"
+[[ -d "opencode" ]] || git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
+pushd opencode
+git pull
+npm -g install bun
+bun install
+./packages/opencode/script/build.ts --single
+cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
+popd
 
 # install opencode plugins
 pushd ~/.config/opencode
@@ -24,11 +26,11 @@ popd
 
 # install uv
 #cargo install --locked uv
-type ~/.local/bin/uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+which uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # install browser-use
-#~/.local/bin/uv tool install -U browser-use[cli]
-~/.local/bin/uv tool install -U git+https://github.com/khimaros/browser-use[cli]
+#uv tool install -U browser-use[cli]
+uv tool install -U git+https://github.com/khimaros/browser-use[cli]
 
 # initialize git repo: required to avoid "global" project in "/"
 pushd ~/workspace/
