@@ -31,7 +31,7 @@ popd
 #   1. node_modules/@opencode-ai/plugin exists
 #   2. package.json has @opencode-ai/plugin == Installation.VERSION
 # so we pre-seed both to prevent the startup install from hitting npm.
-OPENCODE_VERSION=$(~/opencode/packages/opencode/dist/opencode-linux-x64/bin/opencode --version)
+OPENCODE_VERSION=$(opencode --version)
 
 # strip @opencode-ai/plugin from package.json so npm install doesn't try to fetch it
 for dir in ~/.config/opencode ~/.opencode; do
