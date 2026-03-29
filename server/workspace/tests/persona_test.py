@@ -565,6 +565,20 @@ try:
     check("data_update returns modified", has_key(r, "modified"))
     check("data_update returns notify", has_key(r, "notify"))
 
+    # auto-create non-existent trait
+    new_trait = ".autocreated.json"
+    new_path = os.path.join(tmp, "traits", new_trait)
+    assert not os.path.exists(new_path), "precondition: trait should not exist yet"
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": new_trait, "key": "foo", "value": "bar"})
+    check("data_update auto-creates trait", "successfully updated" in r["result"])
+    data = json.loads(open(new_path).read())
+    check("data_update auto-created content", data == {"foo": "bar"})
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".autocreated2.json", "value": [1, 2, 3]})
+    data = json.loads(open(os.path.join(tmp, "traits", ".autocreated2.json")).read())
+    check("data_update auto-creates with whole-file overwrite", data == [1, 2, 3])
+
     # --- data_delete ---
 
     open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"x": 1, "y": 2, "arr": [10, 20, 30]}')
@@ -599,9 +613,44 @@ try:
     r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "key": "notarray", "value": 1})
     check("data_append non-array fails", "not an array" in r["result"])
 
+    # auto-create non-existent trait for data_append
+    new_trait = ".append_auto.json"
+    new_path = os.path.join(tmp, "traits", new_trait)
+    assert not os.path.exists(new_path), "precondition: trait should not exist yet"
+
+    r, _, _ = call_tool(hook, "data_append", {"trait": new_trait, "value": "first"})
+    check("data_append auto-creates trait", "successfully appended" in r["result"])
+    data = json.loads(open(new_path).read())
+    check("data_append auto-created as array", data == ["first"])
+
+    os.remove(new_path)
     os.remove(os.path.join(tmp, "traits", ".test.json"))
 
     # --- record_append + record_list + record_count + record_search ---
+
+    # auto-create non-existent .jsonl trait
+    new_jsonl = ".auto_records.jsonl"
+    new_jsonl_path = os.path.join(tmp, "traits", new_jsonl)
+    assert not os.path.exists(new_jsonl_path), "precondition: trait should not exist yet"
+
+    r, _, _ = call_tool(hook, "record_append", {"trait": new_jsonl, "fields": {"type": "test"}})
+    check("record_append auto-creates trait", "successfully appended" in r["result"])
+    check("record_append auto-created file exists", os.path.exists(new_jsonl_path))
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": new_jsonl})
+    check("record_list on auto-created trait", "1/" in r["result"])
+
+    os.remove(new_jsonl_path)
+
+    # record read tools on non-existent trait return error
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".nonexistent.jsonl"})
+    check("record_list missing trait errors", "error" in r["result"].lower())
+
+    r, _, _ = call_tool(hook, "record_count", {"trait": ".nonexistent.jsonl"})
+    check("record_count missing trait errors", "error" in r["result"].lower())
+
+    r, _, _ = call_tool(hook, "record_search", {"trait": ".nonexistent.jsonl", "pattern": "anything"})
+    check("record_search missing trait errors", "error" in r["result"].lower())
 
     open(os.path.join(tmp, "traits", ".test.jsonl"), "w").write("")
 

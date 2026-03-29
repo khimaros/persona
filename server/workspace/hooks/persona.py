@@ -315,7 +315,10 @@ def data_update(
 ) -> HookResult:
     """set a value in a .json trait at a dot-path key, or overwrite the whole file"""
     try:
-        data = load_json_trait(trait)
+        try:
+            data = load_json_trait(trait)
+        except FileNotFoundError:
+            data = {}
         if not key:
             save_json_trait(trait, value)
         else:
@@ -325,7 +328,7 @@ def data_update(
             save_json_trait(trait, data)
         return {"result": f"{AVATAR} successfully updated {trait}", "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
-    except (ValueError, FileNotFoundError) as e:
+    except ValueError as e:
         return {"result": f"{AVATAR} error: {e}"}
 
 @tool
@@ -353,14 +356,17 @@ def data_append(
 ) -> HookResult:
     """append a value to an array in a .json trait"""
     try:
-        data = load_json_trait(trait)
+        try:
+            data = load_json_trait(trait)
+        except FileNotFoundError:
+            data = []
         data, ok = append_at_key(data, key, value)
         if not ok:
             return {"result": f"{AVATAR} failed: target is not an array"}
         save_json_trait(trait, data)
         return {"result": f"{AVATAR} successfully appended to {trait}", "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
-    except (ValueError, FileNotFoundError) as e:
+    except ValueError as e:
         return {"result": f"{AVATAR} error: {e}"}
 
 # --- generic record tools (.jsonl traits) ---
