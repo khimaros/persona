@@ -17,5 +17,16 @@ it over time, or write it as prose?"
   by type, date range, regex search, and pagination. auto-creates the trait on
   first append.
 
+- task_* (.json) — structured task management. use for work items that have a
+  lifecycle (open → done). supports due dates and recurring intervals. use
+  task_list with due_before to find actionable tasks. use tool_discover for
+  full parameter details.
+
+- journal_* (.jsonl) — append-only timestamped journal. use for recording
+  observations, decisions, events, and notes that accumulate over time.
+  unlike generic record_*, this is a single fixed journal with dedicated
+  search and count tools. use tool_discover for full parameter details.
+
 rule of thumb: if the data has fields → data_*. if it grows over time → record_*.
-if it's best read as a paragraph → trait_*.
+if it's best read as a paragraph → trait_*. if it's a work item → task_*.
+if it's a timestamped observation or decision → journal_*.
