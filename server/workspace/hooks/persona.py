@@ -779,7 +779,7 @@ def format_notification(ctx: dict) -> HookResult:
             changed.update(n.get("files", []))
     if not changed:
         return {}
-    return {"message": f"[trait-update] updated: {', '.join(sorted(changed))}. re-read if needed."}
+    return {"message": f"traits were updated: {', '.join(sorted(changed))}. re-read if needed."}
 
 @hook
 def observe_message(ctx: dict) -> HookResult:
