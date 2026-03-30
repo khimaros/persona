@@ -884,7 +884,7 @@ try:
     check("task_update recurring new task exists", len(new_recur) == 1, f"got: {new_recur}")
     if new_recur:
         new_task = data[new_recur[0]]
-        check("task_update recurring new due bumped", new_task["due"] == "2026-04-08T09:00:00.000Z",
+        check("task_update recurring new due bumped", new_task["due"] == "2026-04-08T09:00:00.000+00:00",
               f"got: {new_task['due']}")
         check("task_update recurring new has interval", new_task.get("interval") == "P7D")
         check("task_update recurring new title preserved", new_task["title"] == "recurring task")
@@ -972,6 +972,61 @@ try:
     fields_param = tools_by_name["journal_append"]["parameters"].get("fields", {})
     check("journal_append fields param is typed", isinstance(fields_param, dict) and fields_param.get("type") == "object",
           f"got: {fields_param}")
+
+    # --- datetime format consistency ---
+    # all timestamps must use evolve_datetime canonical format: YYYY-MM-DDTHH:MM:SS.sss+HH:MM
+
+    import re as re_mod
+    DT_RE = re_mod.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$")
+
+    # format_iso produces canonical format
+    from datetime import datetime as dt_cls, timezone as tz_cls
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hooks"))
+    from persona import format_iso
+    now_fmt = format_iso(dt_cls.now(tz_cls.utc))
+    check("format_iso uses offset not Z", now_fmt.endswith("+00:00"), f"got: {now_fmt}")
+    check("format_iso matches canonical pattern", bool(DT_RE.match(now_fmt)), f"got: {now_fmt}")
+
+    # format_iso with non-UTC input still outputs +00:00
+    from datetime import timedelta as td_cls
+    est = tz_cls(td_cls(hours=-5))
+    est_fmt = format_iso(dt_cls(2026, 4, 1, 12, 0, 0, tzinfo=est))
+    check("format_iso converts to UTC offset", est_fmt == "2026-04-01T17:00:00.000+00:00", f"got: {est_fmt}")
+
+    # record_append timestamps use canonical format
+    r, _, _ = call_tool(hook, "record_append", {"trait": ".dt_test.jsonl", "fields": {"v": 1}})
+    dt_line = open(os.path.join(tmp, "traits", ".dt_test.jsonl")).read().strip()
+    dt_entry = json.loads(dt_line)
+    check("record timestamp uses offset format", bool(DT_RE.match(dt_entry["timestamp"])),
+          f"got: {dt_entry['timestamp']}")
+    check("record timestamp ends with +00:00", dt_entry["timestamp"].endswith("+00:00"),
+          f"got: {dt_entry['timestamp']}")
+    os.remove(os.path.join(tmp, "traits", ".dt_test.jsonl"))
+
+    # task_create timestamps use canonical format
+    open(os.path.join(tmp, "traits", ".tasks.json"), "w").write("{}")
+    r, _, _ = call_tool(hook, "task_create", {"title": "dt format check"})
+    tid = r["result"].split("created task ")[1].split(":")[0].strip()
+    tasks_data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
+    check("task created timestamp canonical", bool(DT_RE.match(tasks_data[tid]["created"])),
+          f"got: {tasks_data[tid]['created']}")
+    check("task updated timestamp canonical", bool(DT_RE.match(tasks_data[tid]["updated"])),
+          f"got: {tasks_data[tid]['updated']}")
+    os.remove(os.path.join(tmp, "traits", ".tasks.json"))
+
+    # journal_append timestamps use canonical format
+    open(os.path.join(tmp, "traits", ".journal.jsonl"), "w").write("")
+    r, _, _ = call_tool(hook, "journal_append", {"fields": {"content": "dt check"}})
+    j_line = open(os.path.join(tmp, "traits", ".journal.jsonl")).read().strip()
+    j_entry = json.loads(j_line)
+    check("journal timestamp uses offset format", bool(DT_RE.match(j_entry["timestamp"])),
+          f"got: {j_entry['timestamp']}")
+    os.remove(os.path.join(tmp, "traits", ".journal.jsonl"))
+
+    # ISO_DT_DESC references offset format not Z
+    from persona import ISO_DT_DESC
+    check("ISO_DT_DESC uses offset example", "+00:00" in ISO_DT_DESC, f"got: {ISO_DT_DESC}")
+    check("ISO_DT_DESC does not use Z example", "000Z" not in ISO_DT_DESC, f"got: {ISO_DT_DESC}")
 
 finally:
     shutil.rmtree(tmp)

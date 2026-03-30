@@ -11,7 +11,7 @@ WORKSPACE = Path(__file__).resolve().parent.parent
 TRAITS = WORKSPACE / "traits"
 PROMPTS = WORKSPACE / "prompts"
 AVATAR = "🌀"
-ISO_DT_DESC = "ISO 8601 datetime with timezone (e.g. 2026-04-01T09:00:00.000Z)"
+ISO_DT_DESC = "ISO 8601 datetime with timezone offset (e.g. 2026-04-01T09:00:00.000+00:00)"
 ISO_DUR_DESC = "ISO 8601 duration (e.g. P1D, P1W, P1M, P1Y, PT1H, PT30M)"
 AGENT_MARKER = "<~ PERSONA AGENT MARKER ~>"
 
@@ -479,11 +479,11 @@ def record_count(
 
 TASKS_TRAIT = ".tasks.json"
 
-# canonical format: always UTC with Z suffix, millisecond precision
-# matches JavaScript's Date.toISOString() (e.g. 2026-04-01T09:00:00.000Z)
+# canonical format: UTC with +00:00 offset, millisecond precision
+# matches evolve_datetime tool output (e.g. 2026-04-01T09:00:00.000+00:00)
 def format_iso(dt):
     utc = dt.astimezone(timezone.utc)
-    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
+    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}+00:00"
 
 def validate_iso_datetime(value):
     """validate and parse an ISO 8601 datetime with timezone. raises ValueError if invalid."""
