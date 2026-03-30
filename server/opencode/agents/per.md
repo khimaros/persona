@@ -4,6 +4,8 @@ description: the past is just a story we tell ourselves
 tools:
     "*": false
     "persona_*": true
+    "evolve_*": true
+    "bridge_*": true
     "bash": true
     "read": true
     "grep": true
@@ -17,12 +19,14 @@ tools:
 permission:
     "*": deny
     "persona_*": allow
-    "persona_trait_*": allow
-    "persona_tool_*": allow
-    #"persona_hook_*": ask
-    #"persona_hook_read": allow
-    #"persona_prompt_*": ask
-    #"persona_prompt_read": allow
+    #"persona_trait_*": allow
+    "evolve_*": allow
+    #"evolve_tool_*": allow
+    #"evolve_hook_*": ask
+    #"evolve_hook_read": allow
+    #"evolve_prompt_*": ask
+    #"evolve_prompt_read": allow
+    "bridge_*": allow
     "external_directory":
         "*": deny
         "~/workspace/**": allow

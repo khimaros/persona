@@ -426,7 +426,7 @@ try:
         "notifications": [{"type": "trait_changed", "files": ["FOO.md", "BAR.md"]}],
     })
     check("format_notification returns message", has_key(r, "message"))
-    check("format_notification message has trait-update", "trait-update" in r.get("message", ""))
+    check("format_notification message has update text", "traits were updated" in r.get("message", ""))
     check("format_notification message includes files", "BAR.md" in r.get("message", "") and "FOO.md" in r.get("message", ""))
 
     r, _, _ = call_hook(hook, "format_notification", {"notifications": []})
