@@ -757,6 +757,23 @@ try:
     r, _, _ = call_tool(hook, "record_append", {"trait": "noext"})
     check("record_append rejects non-.jsonl", "error" in r["result"].lower())
 
+    # --- record_fields ---
+
+    r, _, _ = call_tool(hook, "record_fields", {"trait": ".test.jsonl"})
+    check("record_fields lists field names", "timestamp" in r["result"])
+    check("record_fields includes type", "type" in r["result"])
+    check("record_fields includes content", "content" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_fields", {"trait": ".test.jsonl", "field": "type"})
+    check("record_fields unique values for type", "note" in r["result"])
+    check("record_fields unique values includes obs", "obs" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_fields", {"trait": ".test.jsonl", "field": "nonexistent"})
+    check("record_fields no values for missing field", "0 unique" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_fields", {"trait": ".nonexistent.jsonl"})
+    check("record_fields missing trait errors", "error" in r["result"].lower())
+
     os.remove(os.path.join(tmp, "traits", ".test.jsonl"))
 
     # --- task_create + task_list + task_update + task_delete ---
@@ -927,26 +944,44 @@ try:
 
     open(os.path.join(tmp, "traits", ".journal.jsonl"), "w").write("")
 
-    r, _, _ = call_tool(hook, "journal_append", {"fields": {"type": "thought", "content": "i exist"}})
+    r, _, _ = call_tool(hook, "journal_append", {"type": "thought", "content": "i exist"})
     check("journal_append succeeds", "journal entry recorded" in r["result"])
     check("journal_append returns modified", has_key(r, "modified"))
 
-    r, _, _ = call_tool(hook, "journal_append", {"fields": {"type": "obs", "content": "humans sleep"}})
+    r, _, _ = call_tool(hook, "journal_append", {"type": "obs", "content": "humans sleep"})
+
+    # required field validation
+    r, _, _ = call_tool(hook, "journal_append", {"content": "no type"})
+    check("journal_append requires type", "error" in r["result"].lower())
+
+    r, _, _ = call_tool(hook, "journal_append", {"type": "note"})
+    check("journal_append requires content", "error" in r["result"].lower())
+
+    # recommended + arbitrary fields via fields dict
+    r, _, _ = call_tool(hook, "journal_append", {"type": "event", "content": "auth broke",
+        "fields": {"severity": "high", "tags": "auth,prod", "custom_field": "extra"}})
+    check("journal_append with extra fields", "journal entry recorded" in r["result"])
+    lines = open(os.path.join(tmp, "traits", ".journal.jsonl")).read().strip().splitlines()
+    entry = json.loads(lines[-1])
+    check("journal entry has severity", entry.get("severity") == "high")
+    check("journal entry has tags", entry.get("tags") == "auth,prod")
+    check("journal entry has custom field", entry.get("custom_field") == "extra")
+    check("journal entry has type from param", entry.get("type") == "event")
+    check("journal entry has content from param", entry.get("content") == "auth broke")
 
     r, _, _ = call_tool(hook, "journal_list")
-    check("journal_list shows all", "2/" in r["result"])
+    check("journal_list shows all", "3/" in r["result"])
 
     r, _, _ = call_tool(hook, "journal_list", {"type": "thought"})
     check("journal_list filter type", "1/" in r["result"])
 
     r, _, _ = call_tool(hook, "journal_count")
-    check("journal_count total", "2 records" in r["result"])
+    check("journal_count total", "3 records" in r["result"])
 
     r, _, _ = call_tool(hook, "journal_search", {"pattern": "exist"})
     check("journal_search finds match", "1 matches" in r["result"])
 
     # verify journal entries have timestamps
-    lines = open(os.path.join(tmp, "traits", ".journal.jsonl")).read().strip().splitlines()
     entry = json.loads(lines[0])
     check("journal entry has timestamp", "timestamp" in entry)
     check("journal entry has fields", entry.get("content") == "i exist")
@@ -958,7 +993,7 @@ try:
     r, _, _ = call_hook(hook, "discover")
     names = [t["name"] for t in r["tools"]]
     for expected in ("data_read", "data_update", "data_delete", "data_append",
-                     "record_append", "record_list", "record_search", "record_count",
+                     "record_append", "record_list", "record_search", "record_count", "record_fields",
                      "task_list", "task_read", "task_create", "task_update", "task_delete",
                      "journal_append", "journal_list", "journal_search", "journal_count"):
         check(f"discover includes {expected}", expected in names, f"got: {names}")
@@ -1016,7 +1051,7 @@ try:
 
     # journal_append timestamps use canonical format
     open(os.path.join(tmp, "traits", ".journal.jsonl"), "w").write("")
-    r, _, _ = call_tool(hook, "journal_append", {"fields": {"content": "dt check"}})
+    r, _, _ = call_tool(hook, "journal_append", {"type": "test", "content": "dt check"})
     j_line = open(os.path.join(tmp, "traits", ".journal.jsonl")).read().strip()
     j_entry = json.loads(j_line)
     check("journal timestamp uses offset format", bool(DT_RE.match(j_entry["timestamp"])),

@@ -475,6 +475,32 @@ def record_count(
     except (ValueError, FileNotFoundError) as e:
         return {"result": f"{AVATAR} error: {e}"}
 
+@tool
+def record_fields(
+    trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
+    field: Annotated[str, param("if set, list unique values for this field instead of field names", optional=True)] = "",
+) -> HookResult:
+    """list unique field names across all records, or unique values for a specific field"""
+    try:
+        records = load_records(trait)
+        if field:
+            counts: dict[str, int] = {}
+            for r in records:
+                v = r.get(field)
+                if v is not None:
+                    key = str(v)
+                    counts[key] = counts.get(key, 0) + 1
+            lines = [f"{k}: {c}" for k, c in counts.items()]
+            return {"result": f"{AVATAR} {len(counts)} unique values for \"{field}\":\n" + "\n".join(lines)}
+        counts = {}
+        for r in records:
+            for k in r:
+                counts[k] = counts.get(k, 0) + 1
+        lines = [f"{k}: {c}" for k, c in counts.items()]
+        return {"result": f"{AVATAR} {len(counts)} fields ({len(records)} records):\n" + "\n".join(lines)}
+    except (ValueError, FileNotFoundError) as e:
+        return {"result": f"{AVATAR} error: {e}"}
+
 # --- task tools (fixed trait: .tasks.json) ---
 
 TASKS_TRAIT = ".tasks.json"
@@ -675,12 +701,18 @@ JOURNAL_TRAIT = ".journal.jsonl"
 
 @tool
 def journal_append(
-    fields: Annotated[object, param("record fields as a JSON object", type="object")] = None,
+    type: Annotated[str, "entry type (e.g. note, observation, decision, event)"],
+    content: Annotated[str, "entry content"],
+    fields: Annotated[object, param("additional fields (recommended: severity, tags, related)", type="object", optional=True)] = None,
 ) -> HookResult:
     """append a timestamped entry to the journal"""
     try:
+        if not type:
+            return {"result": f"{AVATAR} error: type is required"}
+        if not content:
+            return {"result": f"{AVATAR} error: content is required"}
         trait_path(JOURNAL_TRAIT)
-        record = {"timestamp": format_iso(datetime.now(timezone.utc))}
+        record = {"timestamp": format_iso(datetime.now(timezone.utc)), "type": type, "content": content}
         if isinstance(fields, dict):
             record.update(fields)
         append_record(JOURNAL_TRAIT, record)

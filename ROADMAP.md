@@ -16,6 +16,7 @@
     [~] browser_url_remove("https://github.com/khimaros/*", "allow")
     [~] patch("~/.config/opencode/plugins/persona.ts", oldString, newString)
     [~] patch("~/.config/opencode/tools/persona.ts", oldString, newString)
+[x] record_fields tool: introspect unique fields/values in .jsonl traits
 [ ] add description field to task data structure
 [ ] speech-to-text and text-to-speech for chats
 [ ] install forked opencode-ai
