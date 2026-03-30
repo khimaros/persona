@@ -92,7 +92,7 @@ ssh:
 .PHONY: ssh
 
 browser-head:
-	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- "$(USER_HOME)/.local/bin/browser-head start && $(USER_HOME)/.local/bin/browser-head wait"
+	clear && ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- "$(USER_HOME)/.local/bin/browser-head start && $(USER_HOME)/.local/bin/browser-head wait"
 .PHONY: browser-head
 
 browser-stop:
