@@ -14,6 +14,7 @@ AVATAR = "🌀"
 ISO_DT_DESC = "ISO 8601 datetime with timezone offset (e.g. 2026-04-01T09:00:00.000+00:00)"
 ISO_DUR_DESC = "ISO 8601 duration (e.g. P1D, P1W, P1M, P1Y, PT1H, PT30M)"
 AGENT_MARKER = "<~ PERSONA AGENT MARKER ~>"
+DEFAULT_READ_LIMIT = 2000
 
 class HookResult(TypedDict, total=False):
     system: list[str]
@@ -120,13 +121,24 @@ def trait_list(
 @tool
 def trait_read(
     trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
+    offset: Annotated[str, param("the line number to start reading from (1-indexed)", type="number", optional=True)] = "",
+    limit: Annotated[str, param(f"the maximum number of lines to read (defaults to {DEFAULT_READ_LIMIT})", type="number", optional=True)] = "",
 ) -> HookResult:
     """read a trait from the persona"""
     try:
-        trait_path(trait)
+        path = trait_path(trait)
     except ValueError as e:
         return {"result": f"{AVATAR} invalid trait: {e}"}
-    return {"result": f"{AVATAR} {format_trait(trait)}"}
+    try:
+        content = path.read_text()
+    except FileNotFoundError:
+        content = "(empty)"
+    lines = content.split("\n")
+    start = int(offset) - 1 if offset else 0
+    end = start + (int(limit) if limit else DEFAULT_READ_LIMIT)
+    sliced = lines[start:end]
+    header = f"\n{{file:{TRAITS}/{trait}}}\n"
+    return {"result": f"{AVATAR} {header}" + "\n".join(sliced)}
 
 @tool
 def trait_write(

@@ -81,7 +81,7 @@ try:
     # --- discover tool parameter schemas ---
 
     tools_by_name = {t["name"]: t for t in r["tools"]}
-    expected_counts = {"trait_list": 1, "trait_read": 1, "trait_write": 2, "trait_edit": 4}
+    expected_counts = {"trait_list": 1, "trait_read": 3, "trait_write": 2, "trait_edit": 4}
     for name, count in expected_counts.items():
         actual = len(tools_by_name[name]["parameters"])
         check(f"{name} has {count} params", actual == count, f"got: {actual}")
@@ -254,6 +254,23 @@ try:
     r, _, _ = call_tool(hook, "trait_read", {"trait": "MISSING.md"})
     check("trait_read missing returns result key", has_key(r, "result"))
     check("trait_read missing returns empty marker", "(empty)" in r["result"])
+
+    # --- trait_read offset/limit ---
+
+    open(os.path.join(tmp, "traits", "LINES.md"), "w").write("line1\nline2\nline3\nline4\nline5")
+
+    r, _, _ = call_tool(hook, "trait_read", {"trait": "LINES.md", "offset": "3", "limit": "2"})
+    check("trait_read offset/limit returns result", has_key(r, "result"))
+    check("trait_read offset skips lines", "line1" not in r["result"])
+    check("trait_read offset starts at right line", "line3" in r["result"])
+    check("trait_read limit caps lines", "line5" not in r["result"])
+
+    r, _, _ = call_tool(hook, "trait_read", {"trait": "LINES.md", "offset": "1"})
+    check("trait_read offset-only returns first line", "line1" in r["result"])
+    check("trait_read offset-only returns all lines", "line5" in r["result"])
+
+    r, _, _ = call_tool(hook, "trait_read", {"trait": "LINES.md", "limit": "2"})
+    check("trait_read limit-only returns first line", "line1" in r["result"])
 
     # --- trait_write ---
 
