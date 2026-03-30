@@ -8,41 +8,27 @@ allowed-tools: bash
 
 Control the browser using the `browser-use` CLI. This tool interacts with elements using **numerical indices**.
 
-## ⚡ Session Management & Startup
+## ⚡ Session Management
 
-Follow this standard flow to manage browser sessions effectively.
-
-### BEGIN
-*  EXEC `browser-use sessions` to check for an active "default" session.
-*  IF "default" EXISTS: GOTO BROWSE
-*  ELSE: GOTO SESSION
-
-### SESSION
-*  EXEC `browser-use --connect state`
-*  IF EXEC FAILS: GOTO HEADLESS
-*  ELSE: GOTO BROWSE
-
-### HEADLESS
-*  Start a headless Chrome instance. EXEC:
+*  EXEC `browser-head start` to ensure a browser session is running. It reuses an existing session or launches chrome and connects browser-use automatically. Headless or headed mode is selected based on `DISPLAY`.
+*  Once connected, use browser-use commands directly:
 ```bash
-google-chrome --headless --user-data-dir=${HOME}/.chrome-profile/ --remote-debugging-port=9222`
-```
-*  GOTO SESSION
-
-### BROWSE
-*  Continue using the browser to navigate/interact
-```bash
-# Once the browser-use session is initialized, omit the --connect flag.
-# Commands will automatically use the active default session.
 browser-use open "https://example.com"
 browser-use click 5
 ```
+
+| Command | Description |
+| :--- | :--- |
+| `browser-head start` | Start chrome and connect browser-use (reuses existing session) |
+| `browser-head stop` | Close browser-use session and kill chrome |
+| `browser-head restart` | Stop then start |
+| `browser-head status` | Check if chrome and browser-use session are running |
+| `browser-head wait` | Block until chrome exits, then close the browser-use session |
+
 **IMPORTANT**: if you encounter a captcha with a headed browser,
 STOP and ask the user to respond to the captcha before continuing.
 
-### PERSISTENCE
-*   **LEAVE THE BROWSER OPEN** unless explicitly requested by the user.
-*   The browser state persists between commands.
+**LEAVE THE BROWSER OPEN** unless explicitly requested by the user.
 
 ---
 

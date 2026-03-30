@@ -90,6 +90,11 @@ which uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 #uv tool install -U browser-use[cli]
 uv tool install -U git+https://github.com/khimaros/browser-use[cli]
 
+# symlink opencode skill scripts into PATH
+ln -sf ~/.config/opencode/skills/browser-use/scripts/browser-head ~/.local/bin/
+ln -sf ~/.config/opencode/skills/opencode-operate/scripts/matrix-login ~/.local/bin/
+ln -sf ~/.config/opencode/skills/opencode-operate/scripts/update-opencode-models ~/.local/bin/
+
 # initialize git repo: required to avoid "global" project in "/"
 pushd ~/workspace/
 [[ -d .git ]] || git init
@@ -103,7 +108,7 @@ systemctl --user enable opencode.service
 
 # FIXME: browser-use sometimes produces zombies that hang opencode shutdown
 # presumably only if session is started by opencode bash?
-pgrep -f browser-use && pkill -9 -f browser-use
+#pgrep -f browser-use && pkill -9 -f browser-use
 
 systemctl --user restart opencode.service
 

@@ -76,7 +76,7 @@ push-opencode-auth:
 .PHONY: push-opencode-auth
 
 push-opencode-providers:
-	ssh $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.config/opencode/skills/opencode-operate/scripts/update-opencode-models --api-base $(API_BASE)
+	ssh $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/update-opencode-models --api-base $(API_BASE)
 .PHONY: push-opencode-providers
 
 cleanup-browsers:
@@ -92,12 +92,12 @@ ssh:
 .PHONY: ssh
 
 browser-head:
-	#ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --connect state
-	#ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --headed --profile=persona open about:blank
-	#ssh -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use --connect state || true
-	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- google-chrome --user-data-dir=${USER_HOME}/.chrome-profile/ --remote-debugging-port=9222
-	ssh -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-use close
+	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- "$(USER_HOME)/.local/bin/browser-head start && $(USER_HOME)/.local/bin/browser-head wait"
 .PHONY: browser-head
+
+browser-stop:
+	ssh -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-head stop
+.PHONY: browser-stop
 
 webui:
 	open http://$(ADDRESS):4096/

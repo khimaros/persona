@@ -45,7 +45,8 @@ permission:
     "bash":
         "*": deny
         #"~/workspace/tests/persona_test.py": allow
-        "google-chrome --headless --user-data-dir=* --remote-debugging-port=9222": allow
+        "browser-head start": allow
+        "browser-head stop": deny
         "browser-use*": allow
         "browser-use init*": deny
         "browser-use run*": deny
@@ -58,7 +59,7 @@ permission:
         #"browser-use cookies*": ask
         "browser-use back": allow
         "browser-use switch-tab*": allow
-        "browser-use screenshot*": allow
+        "browser-use screenshot*": deny
         "browser-use click *": allow
         "browser-use dblclick *": allow
         "browser-use rightclick *": allow
@@ -69,11 +70,10 @@ permission:
         "browser-use select *": allow
         "browser-use scroll *": allow
         "browser-use switch *": allow
-        "browser-use get *": allow
+        "browser-use get *": deny
         "browser-use new-tab": allow
         "browser-use close-tab*": allow
-        # command to start a headless session
-        "browser-use --user-data-dir* new-tab": allow
+        # browser-head handles session startup
         "browser-use open *": allow
         #"browser-use open https://news.ycombinator.com*": allow
     "skill": allow

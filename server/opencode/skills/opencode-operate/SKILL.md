@@ -55,7 +55,7 @@ Manage how OpenCode behaves and what it can access.
 
 Synchronize models from providers to your configuration.
 
-- **Tool**: `scripts/update-opencode-models`
+- **Tool**: `update-opencode-models`
 - **Usage**: Run with `--api-base <url>` (e.g., `http://myhost:7860/v1`) to automatically pull in models from that host.
 - **Manual Steps**:
   - Update the provider key and name in `opencode.jsonc` after running the script.
@@ -65,7 +65,7 @@ Synchronize models from providers to your configuration.
 
 Log in to a matrix homeserver and save bridge credentials to `persona.env`.
 
-- **Tool**: `scripts/matrix-login` (prompts for homeserver, username, and password)
+- **Tool**: `matrix-login` (prompts for homeserver, username, and password)
 - Updates `BRIDGE_HOMESERVER`, `BRIDGE_USER_ID`, and `BRIDGE_ACCESS_TOKEN` in `persona.env`.
 - Preserves existing env vars and comments. Uncomments commented-out keys if present.
 

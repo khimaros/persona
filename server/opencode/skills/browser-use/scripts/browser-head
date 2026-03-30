@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+# manage a chrome instance with browser-use session.
+
+export PATH="${HOME}/.local/bin:${PATH}"
+
+CHROME_PROFILE="${HOME}/.chrome-profile/"
+DEBUG_PORT=9222
+CONNECT_RETRIES=10
+CONNECT_DELAY=1
+PIDFILE="/tmp/browser-head.pid"
+
+cmd_start() {
+  # reuse existing session if one is already running
+  if browser-use --connect state >/dev/null 2>&1; then
+    echo "[*] existing browser session found, reusing"
+    return 0
+  fi
+
+  local chrome_args=(
+    --user-data-dir="${CHROME_PROFILE}"
+    --remote-debugging-port="${DEBUG_PORT}"
+  )
+
+  if [ -z "${DISPLAY}" ]; then
+    echo "[*] no DISPLAY set, launching in headless mode..."
+    chrome_args+=(--headless)
+  else
+    echo "[*] starting browser head on ${DISPLAY}..."
+  fi
+
+  local logfile="/tmp/browser-head.log"
+  google-chrome "${chrome_args[@]}" >"${logfile}" 2>&1 &
+  local chrome_pid=$!
+
+  echo "[*] waiting for chrome to accept connections (pid ${chrome_pid})..."
+  for i in $(seq 1 "${CONNECT_RETRIES}"); do
+    if ! kill -0 "${chrome_pid}" 2>/dev/null; then
+      echo "[!] chrome exited unexpectedly, log:"
+      tail -20 "${logfile}"
+      return 1
+    fi
+    if browser-use --connect state >/dev/null 2>&1; then
+      echo "[*] browser-use connected"
+      break
+    fi
+    sleep "${CONNECT_DELAY}"
+  done
+
+  echo "${chrome_pid}" > "${PIDFILE}"
+  disown "${chrome_pid}"
+}
+
+cmd_wait() {
+  if [ ! -f "${PIDFILE}" ]; then
+    echo "[!] no pidfile found, is chrome running?"
+    return 1
+  fi
+  local pid
+  pid=$(cat "${PIDFILE}")
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    echo "[!] chrome process ${pid} is not running"
+    rm -f "${PIDFILE}"
+    return 1
+  fi
+  echo "[*] waiting for chrome to exit (pid ${pid})..."
+  tail --pid="${pid}" -f /dev/null
+  echo "[*] closing browser-use session..."
+  browser-use close >/dev/null 2>&1
+  rm -f "${PIDFILE}"
+  echo "[*] done"
+}
+
+cmd_status() {
+  if [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
+    echo "[*] chrome running (pid $(cat "${PIDFILE}"))"
+  else
+    echo "[*] chrome not running"
+  fi
+  if browser-use --connect state >/dev/null 2>&1; then
+    echo "[*] browser-use session active"
+  else
+    echo "[*] browser-use session inactive"
+  fi
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_start
+}
+
+cmd_stop() {
+  echo "[*] closing browser-use session..."
+  browser-use close >/dev/null 2>&1
+
+  if [ -f "${PIDFILE}" ]; then
+    local pid
+    pid=$(cat "${PIDFILE}")
+    echo "[*] stopping chrome (pid ${pid})..."
+    kill "${pid}" 2>/dev/null
+    rm -f "${PIDFILE}"
+  fi
+
+  echo "[*] done"
+}
+
+case "${1}" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_restart ;;
+  status)  cmd_status ;;
+  wait)    cmd_wait ;;
+  *)       echo "usage: browser-head {start|stop|restart|status|wait}" >&2; exit 1 ;;
+esac
