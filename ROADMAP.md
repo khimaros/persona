@@ -5,6 +5,7 @@
 [ ] allow pushing dev branch of browser-use manually into guest
 [@] enable default ask and whitelist allow for browser-use
 
+[@] trait tools: directory cleanup on delete/move, auto-create dirs on write/move
 [ ] create tools for editing agents/per.md frontmatter
     [ ] permission_add("bash", "cat /etc/*", "ask")
     [ ] permission_remove("bash", "cat /etc/*", "ask")

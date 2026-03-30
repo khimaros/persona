@@ -57,7 +57,7 @@ def is_core(name):
 
 def trait_names(include_hidden=False):
     return sorted(
-        f.name for f in TRAITS.iterdir()
+        str(f.relative_to(TRAITS)) for f in TRAITS.rglob("*")
         if f.is_file() and (include_hidden or not is_hidden(f.name))
     )
 
@@ -73,6 +73,16 @@ def trait_path(name):
     if not resolved.parts or not str(resolved).startswith(str(TRAITS.resolve())):
         raise ValueError(f"invalid trait path: {name}")
     return resolved
+
+def cleanup_empty_parents(path):
+    """remove empty ancestor directories up to (but not including) TRAITS/."""
+    parent = path.parent
+    while parent != TRAITS and parent.is_dir():
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
 
 def prompt_path(name):
     return PROMPTS / f"{name}.md"
@@ -102,14 +112,14 @@ def system_prompt(mode=None):
 def trait_list(
     include_hidden: Annotated[str, param("include hidden (dot-prefixed) traits", type="boolean", optional=True)] = "false",
 ) -> HookResult:
-    """list all traits of the persona"""
+    """list all traits of the persona, including those in subdirectories (shown as relative paths)"""
     show_hidden = str(include_hidden).lower() == "true"
     names = trait_names(include_hidden=show_hidden)
     return {"result": f"{AVATAR} available traits: {', '.join(names)}"}
 
 @tool
 def trait_read(
-    trait: Annotated[str, "trait filename in traits/ (e.g. SOUL.md)"],
+    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
 ) -> HookResult:
     """read a trait from the persona"""
     try:
@@ -120,22 +130,22 @@ def trait_read(
 
 @tool
 def trait_write(
-    trait: Annotated[str, "trait filename in traits/ (e.g. SOUL.md)"],
+    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
     content: Annotated[str, "full content for the trait"],
 ) -> HookResult:
-    """write a trait to the persona"""
+    """write a trait to the persona. parent directories are created automatically"""
     try:
         path = trait_path(trait)
     except ValueError as e:
         return {"result": f"{AVATAR} invalid trait: {e}"}
-    TRAITS.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return {"result": f"{AVATAR} successfully wrote {trait}", "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool
 def trait_edit(
-    trait: Annotated[str, "trait filename in traits/ (e.g. SOUL.md)"],
+    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
     oldString: Annotated[str, "the text to replace"],
     newString: Annotated[str, "the text to replace it with (must be different from oldString)"],
     replaceAll: Annotated[str, param("replace all occurrences (default false)", type="boolean", optional=True)] = "false",
@@ -145,7 +155,6 @@ def trait_edit(
         path = trait_path(trait)
     except ValueError as e:
         return {"result": f"{AVATAR} invalid trait: {e}"}
-    TRAITS.mkdir(parents=True, exist_ok=True)
     content = path.read_text()
     n = content.count(oldString)
     if n == 0:
@@ -161,9 +170,9 @@ def trait_edit(
 
 @tool
 def trait_delete(
-    trait: Annotated[str, "trait filename in traits/ (e.g. SOUL.md)"],
+    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
 ) -> HookResult:
-    """delete a trait from the persona"""
+    """delete a trait from the persona. empty parent directories are removed automatically"""
     try:
         path = trait_path(trait)
     except ValueError as e:
@@ -171,15 +180,16 @@ def trait_delete(
     if not path.exists():
         return {"result": f"{AVATAR} not found: {trait}"}
     path.unlink()
+    cleanup_empty_parents(path)
     return {"result": f"{AVATAR} successfully deleted {trait}", "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool
 def trait_move(
-    old_trait: Annotated[str, "current trait filename in traits/"],
-    new_trait: Annotated[str, "new trait filename in traits/"],
+    old_trait: Annotated[str, "current trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
+    new_trait: Annotated[str, "new trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
 ) -> HookResult:
-    """rename or move a trait in the persona"""
+    """rename or move a trait in the persona. destination directories are created and empty source directories are removed automatically"""
     try:
         src = trait_path(old_trait)
         dst = trait_path(new_trait)
@@ -189,7 +199,9 @@ def trait_move(
         return {"result": f"{AVATAR} not found: {old_trait}"}
     if dst.exists():
         return {"result": f"{AVATAR} already exists: {new_trait}"}
+    dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
+    cleanup_empty_parents(src)
     return {"result": f"{AVATAR} moved {old_trait} -> {new_trait}", "modified": [old_trait, new_trait],
             "notify": [{"type": "trait_changed", "files": [old_trait, new_trait]}]}
 
@@ -409,11 +421,11 @@ def record_list(
     trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
     type: Annotated[str, param("filter by type field", optional=True)] = "",
     limit: Annotated[str, param("max records to return (default 50)", optional=True)] = "50",
-    offset: Annotated[str, param("skip first N records (default 0)", optional=True)] = "0",
+    offset: Annotated[str, param("skip first N records, negative counts from end (default 0, oldest first)", optional=True)] = "0",
     after: Annotated[str, param(f"filter: only records after this {ISO_DT_DESC}", optional=True)] = "",
     before: Annotated[str, param(f"filter: only records before this {ISO_DT_DESC}", optional=True)] = "",
 ) -> HookResult:
-    """list records from a .jsonl trait with optional filtering"""
+    """list records from a .jsonl trait in chronological order with optional filtering"""
     try:
         records = load_records(trait)
         if type:
@@ -424,6 +436,8 @@ def record_list(
             records = [r for r in records if r.get("timestamp", "") < before]
         start = int(offset)
         end = start + int(limit)
+        if start < 0 and end >= 0:
+            end = None
         page = records[start:end]
         return {"result": f"{AVATAR} {len(page)}/{len(records)} records:\n" +
                 "\n".join(json.dumps(r, ensure_ascii=False) for r in page)}
@@ -679,11 +693,11 @@ def journal_append(
 def journal_list(
     type: Annotated[str, param("filter by type field", optional=True)] = "",
     limit: Annotated[str, param("max entries to return (default 50)", optional=True)] = "50",
-    offset: Annotated[str, param("skip first N entries (default 0)", optional=True)] = "0",
+    offset: Annotated[str, param("skip first N entries, negative counts from end (default 0, oldest first)", optional=True)] = "0",
     after: Annotated[str, param(f"only entries after this {ISO_DT_DESC}", optional=True)] = "",
     before: Annotated[str, param(f"only entries before this {ISO_DT_DESC}", optional=True)] = "",
 ) -> HookResult:
-    """list journal entries with optional filtering"""
+    """list journal entries in chronological order with optional filtering"""
     return record_list(trait=JOURNAL_TRAIT, type=type, limit=limit,
                        offset=offset, after=after, before=before)
 

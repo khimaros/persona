@@ -222,6 +222,14 @@ try:
     r, _, _ = call_tool(hook, "trait_list", {"include_hidden": False})
     check("trait_list bool false excludes hidden", ".hidden.md" not in r["result"])
 
+    # trait_list includes subdirectory traits with relative paths
+    os.makedirs(os.path.join(tmp, "traits", "topics"), exist_ok=True)
+    open(os.path.join(tmp, "traits", "topics", "music.md"), "w").write("f")
+    r, _, _ = call_tool(hook, "trait_list")
+    check("trait_list includes subdir trait", "topics/music.md" in r["result"])
+    os.remove(os.path.join(tmp, "traits", "topics", "music.md"))
+    os.rmdir(os.path.join(tmp, "traits", "topics"))
+
     for f in ("CORE.md", "notes.md", ".hidden.md", "V2_PLAN.md", "MY.TRAIT.txt"):
         os.remove(os.path.join(tmp, "traits", f))
 
@@ -316,6 +324,51 @@ try:
 
     for f in ("DST.md", "EXIST.md"):
         os.remove(os.path.join(tmp, "traits", f))
+
+    # --- trait directory handling ---
+
+    # trait_write creates parent directories
+    r, _, _ = call_tool(hook, "trait_write", {"trait": "sub/deep/NESTED.md", "content": "nested"})
+    check("trait_write creates parent dirs", os.path.exists(os.path.join(tmp, "traits", "sub", "deep", "NESTED.md")))
+    check("trait_write nested success", "successfully wrote" in r["result"])
+    content = open(os.path.join(tmp, "traits", "sub", "deep", "NESTED.md")).read()
+    check("trait_write nested content correct", content == "nested")
+
+    # trait_delete removes empty parent directories
+    r, _, _ = call_tool(hook, "trait_delete", {"trait": "sub/deep/NESTED.md"})
+    check("trait_delete nested success", "successfully deleted" in r["result"])
+    check("trait_delete removed nested file", not os.path.exists(os.path.join(tmp, "traits", "sub", "deep", "NESTED.md")))
+    check("trait_delete removed empty deep dir", not os.path.exists(os.path.join(tmp, "traits", "sub", "deep")))
+    check("trait_delete removed empty sub dir", not os.path.exists(os.path.join(tmp, "traits", "sub")))
+    check("trait_delete preserves traits dir", os.path.isdir(os.path.join(tmp, "traits")))
+
+    # trait_delete does not remove non-empty parent directories
+    os.makedirs(os.path.join(tmp, "traits", "keep", "inner"), exist_ok=True)
+    open(os.path.join(tmp, "traits", "keep", "sibling.md"), "w").write("keep me")
+    open(os.path.join(tmp, "traits", "keep", "inner", "DEL.md"), "w").write("delete me")
+    r, _, _ = call_tool(hook, "trait_delete", {"trait": "keep/inner/DEL.md"})
+    check("trait_delete removed inner file", not os.path.exists(os.path.join(tmp, "traits", "keep", "inner", "DEL.md")))
+    check("trait_delete removed empty inner dir", not os.path.exists(os.path.join(tmp, "traits", "keep", "inner")))
+    check("trait_delete kept non-empty parent", os.path.isdir(os.path.join(tmp, "traits", "keep")))
+    check("trait_delete kept sibling file", os.path.exists(os.path.join(tmp, "traits", "keep", "sibling.md")))
+    os.remove(os.path.join(tmp, "traits", "keep", "sibling.md"))
+    os.rmdir(os.path.join(tmp, "traits", "keep"))
+
+    # trait_move creates destination parent directories
+    open(os.path.join(tmp, "traits", "MVSRC.md"), "w").write("move to subdir")
+    r, _, _ = call_tool(hook, "trait_move", {"old_trait": "MVSRC.md", "new_trait": "newdir/deep/MVDST.md"})
+    check("trait_move creates dst dirs", os.path.exists(os.path.join(tmp, "traits", "newdir", "deep", "MVDST.md")))
+    check("trait_move to subdir success", "moved" in r["result"])
+    content = open(os.path.join(tmp, "traits", "newdir", "deep", "MVDST.md")).read()
+    check("trait_move to subdir content", content == "move to subdir")
+
+    # trait_move cleans up empty source parent directories
+    r, _, _ = call_tool(hook, "trait_move", {"old_trait": "newdir/deep/MVDST.md", "new_trait": "MVBACK.md"})
+    check("trait_move from subdir success", "moved" in r["result"])
+    check("trait_move cleaned empty deep dir", not os.path.exists(os.path.join(tmp, "traits", "newdir", "deep")))
+    check("trait_move cleaned empty newdir", not os.path.exists(os.path.join(tmp, "traits", "newdir")))
+    check("trait_move preserves traits dir", os.path.isdir(os.path.join(tmp, "traits")))
+    os.remove(os.path.join(tmp, "traits", "MVBACK.md"))
 
     # --- tool_discover ---
 
@@ -673,6 +726,18 @@ try:
 
     r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl", "limit": "1", "offset": "1"})
     check("record_list with offset", "world" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl", "offset": "-1"})
+    check("record_list negative offset", "1/2" in r["result"])
+    check("record_list negative offset content", "world" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl", "offset": "-2", "limit": "1"})
+    check("record_list negative offset with limit", "1/2" in r["result"])
+    check("record_list negative offset with limit content", "hello" in r["result"])
+
+    r, _, _ = call_tool(hook, "record_list", {"trait": ".test.jsonl", "offset": "-1", "limit": "50"})
+    check("record_list negative offset overlimit", "1/2" in r["result"])
+    check("record_list negative offset overlimit content", "world" in r["result"])
 
     r, _, _ = call_tool(hook, "record_count", {"trait": ".test.jsonl"})
     check("record_count total", "2 records" in r["result"])

@@ -10,15 +10,26 @@ npm config set prefix ~/.local
 #nix --extra-experimental-features nix-command --extra-experimental-features flakes profile add github:khimaros/opencode
 #npm -g install "opencode-ai@v1.2.26"
 #npm -g install "opencode-ai@latest"
-[[ -d "opencode" ]] || git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
+OPENCODE_NEEDS_BUILD=false
+if [[ ! -d "opencode" ]]; then
+  git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
+  OPENCODE_NEEDS_BUILD=true
+fi
 pushd opencode
 git fetch origin
+OLD_HEAD=$(git rev-parse HEAD)
 git reset --hard origin/dev
-npm -g install bun
-bun install
-./packages/opencode/script/build.ts --single
-systemctl --user stop opencode.service || true
-cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
+NEW_HEAD=$(git rev-parse HEAD)
+if [[ "$OLD_HEAD" != "$NEW_HEAD" ]]; then
+  OPENCODE_NEEDS_BUILD=true
+fi
+if [[ "$OPENCODE_NEEDS_BUILD" == "true" ]]; then
+  npm -g install bun
+  bun install
+  ./packages/opencode/script/build.ts --single
+  systemctl --user stop opencode.service || true
+  cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
+fi
 popd
 
 # install opencode plugins, using local @opencode-ai/plugin from the build
