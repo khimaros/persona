@@ -52,6 +52,12 @@ push-workspace:
 	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
 .PHONY: push-workspace
 
+push-workspace-traits-base:
+	incus file push ./workspace/traits/AGENTS.md $(INSTANCE)/$(USER_HOME)/workspace/traits/
+	incus file push ./workspace/traits/TOOLS.md $(INSTANCE)/$(USER_HOME)/workspace/traits/
+	incus file push ./workspace/traits/HEARTBEAT.md $(INSTANCE)/$(USER_HOME)/workspace/traits/
+.PHONY: push-workspace-traits-base
+
 push-workspace-tests:
 	incus file push --recursive ./workspace/tests/ $(INSTANCE)/$(USER_HOME)/workspace/
 .PHONY: push-workspace-tests

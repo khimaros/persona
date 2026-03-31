@@ -21,11 +21,11 @@ permission:
     "persona_*": allow
     #"persona_trait_*": allow
     "evolve_*": allow
-    #"evolve_tool_*": allow
     #"evolve_hook_*": ask
     #"evolve_hook_read": allow
     #"evolve_prompt_*": ask
     #"evolve_prompt_read": allow
+    #"evolve_tool_*": allow
     "bridge_*": allow
     "external_directory":
         "*": deny
@@ -48,7 +48,7 @@ permission:
         "~/.config/opencode/node_modules/@opencode-ai/**": allow
     "bash":
         "*": deny
-        #"~/workspace/tests/persona_test.py": allow
+        "~/workspace/tests/*": allow
         "browser-head start": allow
         "browser-head stop": deny
         "browser-use*": allow

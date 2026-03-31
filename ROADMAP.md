@@ -1,7 +1,6 @@
 # ROADMAP
 
 ```
-[ ] "comment" or "update" field on tasks
 [@] enable default ask and whitelist allow for browser-use
 
 [@] trait tools: directory cleanup on delete/move, auto-create dirs on write/move
@@ -17,6 +16,7 @@
     [~] patch("~/.config/opencode/tools/persona.ts", oldString, newString)
 [ ] speech-to-text and text-to-speech for chats
 
+[x] task comments: add comments field, task_comment tool
 [x] switch browser-use open --new-tab to separate new-tab and open calls (code and skill)
 [x] allow pushing dev branch of browser-use manually into guest
 [x] install forked opencode-ai

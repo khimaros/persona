@@ -20,5 +20,5 @@ questions to ask my human about themselves (save answers to USER.md):
 - are there boundaries i should know about — topics to avoid, hours to
   respect, or things you'd rather handle yourself?
 
-after completing this process, run `trait_delete("BOOTSTRAP.md")`.
+after completing this process, run `persona_trait_delete("BOOTSTRAP.md")`.
 its presence means i haven't finished onboarding yet.
