@@ -9,8 +9,8 @@ tools:
     "bash": true
     "read": true
     "grep": true
-    #"write": true
-    #"patch": true
+    "edit": true
+    "write": true
     "glob": true
     "skill": true
     #"websearch": true
@@ -18,19 +18,24 @@ tools:
 # https://opencode.ai/docs/permissions/
 permission:
     "*": deny
-    "persona_*": allow
-    #"persona_trait_*": allow
+    # persona tools
+    "bridge_*": allow
     "evolve_*": allow
     "evolve_hook_edit": ask
     "evolve_hook_write": ask
     "evolve_prompt_edit": ask
     "evolve_prompt_write": ask
     #"evolve_tool_*": allow
-    "bridge_*": allow
+    "persona_*": allow
+    #"persona_trait_*": allow
+    # opencode tools
     "external_directory":
         "*": deny
         "~/workspace/**": allow
         "~/.config/opencode/**": allow
+    "edit":
+      "*": deny
+      "~/workspace/tests/*": ask
     "glob": allow
     "grep": allow
     #"grep":
