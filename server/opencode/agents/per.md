@@ -34,8 +34,9 @@ permission:
         "~/workspace/**": allow
         "~/.config/opencode/**": allow
     "edit":
-      "*": deny
-      "~/workspace/tests/*": ask
+        "*": deny
+        "~/workspace/tests/*": ask
+        "~/.config/opencode/agents/per.md": ask
     "glob": allow
     "grep": allow
     #"grep":
