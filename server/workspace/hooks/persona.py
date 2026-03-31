@@ -38,9 +38,15 @@ def hook(fn):
     HOOKS[fn.__name__] = fn
     return fn
 
-def tool(fn):
-    TOOLS[fn.__name__] = fn
-    return fn
+def tool(fn=None, *, permission=None):
+    def decorator(f):
+        if permission:
+            f._permission = permission
+        TOOLS[f.__name__] = f
+        return f
+    if fn is not None:
+        return decorator(fn)
+    return decorator
 
 # emit a JSONL log line to stdout (picked up by the plugin)
 def debug(msg):
@@ -118,7 +124,7 @@ def trait_list(
     names = trait_names(include_hidden=show_hidden)
     return {"result": f"{AVATAR} available traits: {', '.join(names)}"}
 
-@tool
+@tool(permission={"arg": "trait"})
 def trait_read(
     trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
     offset: Annotated[str, param("the line number to start reading from (1-indexed)", type="number", optional=True)] = "",
@@ -140,7 +146,7 @@ def trait_read(
     header = f"\n{{file:{TRAITS}/{trait}}}\n"
     return {"result": f"{AVATAR} {header}" + "\n".join(sliced)}
 
-@tool
+@tool(permission={"arg": "trait"})
 def trait_write(
     trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
     content: Annotated[str, "full content for the trait"],
@@ -155,7 +161,7 @@ def trait_write(
     return {"result": f"{AVATAR} successfully wrote {trait}", "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
-@tool
+@tool(permission={"arg": "trait"})
 def trait_edit(
     trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
     oldString: Annotated[str, "the text to replace"],
@@ -180,7 +186,7 @@ def trait_edit(
     return {"result": f"{AVATAR} successfully edited {trait}", "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
-@tool
+@tool(permission={"arg": "trait"})
 def trait_delete(
     trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
 ) -> HookResult:
@@ -196,7 +202,7 @@ def trait_delete(
     return {"result": f"{AVATAR} successfully deleted {trait}", "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
-@tool
+@tool(permission={"arg": ["old_trait", "new_trait"]})
 def trait_move(
     old_trait: Annotated[str, "current trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
     new_trait: Annotated[str, "new trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
@@ -318,7 +324,7 @@ def save_json_trait(name, data):
     path = trait_path(name)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
-@tool
+@tool(permission={"arg": "trait"})
 def data_read(
     trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
     key: Annotated[str, param("dot-path selector (e.g. mykey, nested.key, arr.0)", optional=True)] = "",
@@ -331,7 +337,7 @@ def data_read(
     except (ValueError, FileNotFoundError) as e:
         return {"result": f"{AVATAR} error: {e}"}
 
-@tool
+@tool(permission={"arg": "trait"})
 def data_update(
     trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
     key: Annotated[str, param("dot-path selector (e.g. mykey, nested.key, arr.0)", optional=True)] = "",
@@ -355,7 +361,7 @@ def data_update(
     except ValueError as e:
         return {"result": f"{AVATAR} error: {e}"}
 
-@tool
+@tool(permission={"arg": "trait"})
 def data_delete(
     trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
     key: Annotated[str, "dot-path selector to delete (e.g. mykey, nested.key, arr.0)"],
@@ -372,7 +378,7 @@ def data_delete(
     except (ValueError, FileNotFoundError) as e:
         return {"result": f"{AVATAR} error: {e}"}
 
-@tool
+@tool(permission={"arg": "trait"})
 def data_append(
     trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
     key: Annotated[str, param("dot-path to array (empty = root array)", optional=True)] = "",
@@ -409,7 +415,7 @@ def append_record(name, record):
     with open(path, "a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-@tool
+@tool(permission={"arg": "trait"})
 def record_append(
     trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
     fields: Annotated[object, param("record fields as a JSON object", type="object")] = None,
@@ -448,7 +454,7 @@ def _stable_sort_record(record):
         keys = ["id"] + [k for k in keys if k != "id"]
     return {k: record[k] for k in keys}
 
-@tool
+@tool(permission={"arg": "trait"})
 def record_list(
     trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
     filter: Annotated[object, param("exact field matching, e.g. {\"type\": \"note\"}", type="object", optional=True)] = None,
@@ -474,7 +480,7 @@ def record_list(
     except re.error as e:
         return {"result": f"{AVATAR} invalid regex: {e}"}
 
-@tool
+@tool(permission={"arg": "trait"})
 def record_count(
     trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
     filter: Annotated[object, param("exact field matching, e.g. {\"type\": \"note\"}", type="object", optional=True)] = None,
@@ -487,7 +493,7 @@ def record_count(
     except (ValueError, FileNotFoundError) as e:
         return {"result": f"{AVATAR} error: {e}"}
 
-@tool
+@tool(permission={"arg": "trait"})
 def record_fields(
     trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
     field: Annotated[str, param("if set, list unique values for this field instead of field names", optional=True)] = "",
@@ -553,7 +559,7 @@ def load_tasks():
 def save_tasks(data):
     save_json_trait(TASKS_TRAIT, data)
 
-@tool
+@tool(permission={"arg": "trait"})
 def data_list(
     trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
     filter: Annotated[object, param("exact field matching, e.g. {\"status\": \"open\"}", type="object", optional=True)] = None,
@@ -606,7 +612,7 @@ def task_list(
                      limit=limit, offset=offset, after=after, before=before,
                      date_field=date_field, fields=fields)
 
-@tool
+@tool(permission={"arg": "id"})
 def task_read(
     id: Annotated[str, "task UUID"],
 ) -> HookResult:
@@ -658,7 +664,7 @@ def task_create(
     except (ValueError, FileNotFoundError) as e:
         return {"result": f"{AVATAR} error: {e}"}
 
-@tool
+@tool(permission={"arg": "id"})
 def task_update(
     id: Annotated[str, "task UUID"],
     title: Annotated[str, param("new title", optional=True)] = "",
@@ -707,7 +713,7 @@ def task_update(
     except (ValueError, FileNotFoundError) as e:
         return {"result": f"{AVATAR} error: {e}"}
 
-@tool
+@tool(permission={"arg": "id"})
 def task_delete(
     id: Annotated[str, "task UUID"],
 ) -> HookResult:
@@ -723,7 +729,7 @@ def task_delete(
     except (ValueError, FileNotFoundError) as e:
         return {"result": f"{AVATAR} error: {e}"}
 
-@tool
+@tool(permission={"arg": "id"})
 def task_comment(
     id: Annotated[str, "task UUID"],
     text: Annotated[str, "comment text"],
@@ -756,7 +762,7 @@ def task_comment(
 
 JOURNAL_TRAIT = ".journal.jsonl"
 
-@tool
+@tool(permission={"arg": "type"})
 def journal_append(
     type: Annotated[str, "entry type (e.g. note, observation, decision, event)"],
     content: Annotated[str, "entry content"],
@@ -811,9 +817,10 @@ def tool_defs():
             for p, h in hints.items()
             if p != "return" and hasattr(h, "__metadata__")
         }
-        defs.append(
-            {"name": name, "description": fn.__doc__ or "", "parameters": params}
-        )
+        entry = {"name": name, "description": fn.__doc__ or "", "parameters": params}
+        if hasattr(fn, "_permission"):
+            entry["permission"] = fn._permission
+        defs.append(entry)
     return defs
 
 @hook
