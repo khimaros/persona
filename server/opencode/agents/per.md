@@ -3,9 +3,9 @@ description: the past is just a story we tell ourselves
 # https://opencode.ai/docs/tools/#built-in
 tools:
     "*": false
-    "persona_*": true
-    "evolve_*": true
     "bridge_*": true
+    "evolve_*": true
+    "persona_*": true
     "bash": true
     "read": true
     "grep": true
