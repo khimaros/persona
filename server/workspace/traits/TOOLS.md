@@ -19,15 +19,12 @@ it over time, or write it as prose?"
   persona_record_fields to discover field names and unique values. auto-creates
   the trait on first append.
 
-- persona_task_* (.json) — structured task management. one-off tasks have a
-  lifecycle (open → done). recurring tasks (with interval) stay open and are
-  updated via persona_task_comment, which logs progress and auto-bumps the due
-  date by the task's interval. never mark recurring tasks as done. never
-  manually set due on recurring tasks — always use persona_task_comment so the
-  interval is honored. use persona_task_update only for metadata changes
-  (title, description, fields) on recurring tasks. use persona_record_list
-  with filter to view comments on a task. use evolve_tool_list for full
-  parameter details.
+- persona_task_* (.json) — structured task management. one-off tasks go
+  open → done. recurring tasks (with interval) stay open — use
+  persona_task_comment to log progress (auto-bumps due by interval).
+  phrase task titles as concrete actions ("write ...", "update ...") not
+  observations ("review ...", "think about ..."). use evolve_tool_list
+  for full parameter details.
 
 - persona_journal_* (.jsonl) — append-only timestamped journal. use for
   recording observations, decisions, events, and notes that accumulate over

@@ -732,9 +732,9 @@ def task_delete(
 @tool(permission={"arg": "id"})
 def task_comment(
     id: Annotated[str, "task UUID"],
-    text: Annotated[str, "comment text"],
+    text: Annotated[str, "summary of work done on this task"],
 ) -> HookResult:
-    """add a comment to a task. for recurring tasks, auto-bumps due by interval. use persona_record_list with filter to view comments"""
+    """log work done on a task. for recurring tasks, auto-bumps due by interval"""
     try:
         if not text:
             return {"result": f"{AVATAR} error: text is required"}
