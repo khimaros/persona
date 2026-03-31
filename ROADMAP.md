@@ -1,8 +1,7 @@
 # ROADMAP
 
 ```
-[ ] switch browser-use open --new-tab to separate new-tab and open calls (code and skill)
-[ ] allow pushing dev branch of browser-use manually into guest
+[ ] "comment" or "update" field on tasks
 [@] enable default ask and whitelist allow for browser-use
 
 [@] trait tools: directory cleanup on delete/move, auto-create dirs on write/move
@@ -16,11 +15,13 @@
     [~] browser_url_remove("https://github.com/khimaros/*", "allow")
     [~] patch("~/.config/opencode/plugins/persona.ts", oldString, newString)
     [~] patch("~/.config/opencode/tools/persona.ts", oldString, newString)
-[x] record_fields tool: introspect unique fields/values in .jsonl traits
-[ ] add description field to task data structure
 [ ] speech-to-text and text-to-speech for chats
-[ ] install forked opencode-ai
 
+[x] switch browser-use open --new-tab to separate new-tab and open calls (code and skill)
+[x] allow pushing dev branch of browser-use manually into guest
+[x] install forked opencode-ai
+[x] record_fields tool: introspect unique fields/values in .jsonl traits
+[x] add description field to task data structure
 [x] extract opencode-evolve plugin package
 [x] move tests into workspace/
 [x] heartbeat sessions should occasionally be reset (size based? every turn?)
