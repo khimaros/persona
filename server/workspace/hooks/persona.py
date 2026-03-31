@@ -664,11 +664,11 @@ def task_update(
     title: Annotated[str, param("new title", optional=True)] = "",
     description: Annotated[str, param("new description", optional=True)] = "",
     status: Annotated[str, param("new status. never mark recurring tasks as done — use persona_task_comment instead", optional=True)] = "",
-    due: Annotated[str, param(f"new due date as {ISO_DT_DESC}", optional=True)] = "",
+    due: Annotated[str, param(f"new due date as {ISO_DT_DESC}. for recurring tasks, prefer persona_task_comment to auto-bump due by interval", optional=True)] = "",
     interval: Annotated[str, param(f"recurrence as {ISO_DUR_DESC}. requires due", optional=True)] = "",
     fields: Annotated[object, param("arbitrary extra fields to set, e.g. {\"owner\": \"tom\", \"cc\": \"alice\"}", type="object", optional=True)] = None,
 ) -> HookResult:
-    """update an existing task by UUID. for recurring tasks, use persona_task_comment to log updates"""
+    """update task metadata (title, description, fields). for recurring tasks, use persona_task_comment to log progress — it auto-bumps due by interval"""
     try:
         tasks = load_tasks()
         if id not in tasks:

@@ -21,10 +21,10 @@ permission:
     "persona_*": allow
     #"persona_trait_*": allow
     "evolve_*": allow
-    #"evolve_hook_*": ask
-    #"evolve_hook_read": allow
-    #"evolve_prompt_*": ask
-    #"evolve_prompt_read": allow
+    "evolve_hook_edit": ask
+    "evolve_hook_write": ask
+    "evolve_prompt_edit": ask
+    "evolve_prompt_write": ask
     #"evolve_tool_*": allow
     "bridge_*": allow
     "external_directory":

@@ -22,7 +22,10 @@ it over time, or write it as prose?"
 - persona_task_* (.json) — structured task management. one-off tasks have a
   lifecycle (open → done). recurring tasks (with interval) stay open and are
   updated via persona_task_comment, which logs progress and auto-bumps the due
-  date. never mark recurring tasks as done. use persona_record_list
+  date by the task's interval. never mark recurring tasks as done. never
+  manually set due on recurring tasks — always use persona_task_comment so the
+  interval is honored. use persona_task_update only for metadata changes
+  (title, description, fields) on recurring tasks. use persona_record_list
   with filter to view comments on a task. use evolve_tool_list for full
   parameter details.
 
