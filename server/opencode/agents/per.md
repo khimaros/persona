@@ -9,8 +9,8 @@ tools:
     "bash": true
     "read": true
     "grep": true
-    "edit": true
-    "write": true
+    #"edit": true
+    #"write": true
     "glob": true
     "skill": true
     #"websearch": true
@@ -33,10 +33,10 @@ permission:
         "*": deny
         "~/workspace/**": allow
         "~/.config/opencode/**": allow
-    "edit":
-        "*": deny
-        "~/workspace/tests/*": ask
-        "~/.config/opencode/agents/per.md": ask
+    #"edit":
+    #    "*": deny
+    #    "~/workspace/tests/*": ask
+    #    "~/.config/opencode/agents/per.md": ask
     "glob": allow
     "grep": allow
     #"grep":
@@ -44,9 +44,9 @@ permission:
         #"~/workspace/*": allow
     "read":
         "*": deny
-        "~/workspace/**": allow
-        #"~/workspace/config/*": allow
-        #"~/workspace/tests/*": allow
+        #"~/workspace/**": allow
+        "~/workspace/config/*": allow
+        "~/workspace/tests/*": allow
         "~/.config/opencode/opencode.jsonc": allow
         "~/.config/opencode/agents/per.md": allow
         "~/.config/opencode/node_modules/opencode-bridge/README.md": allow
@@ -80,7 +80,7 @@ permission:
         "browser-use select *": allow
         "browser-use scroll *": allow
         "browser-use switch *": allow
-        "browser-use get *": deny
+        "browser-use get *": allow
         "browser-use new-tab": allow
         "browser-use close-tab*": allow
         # browser-head handles session startup
