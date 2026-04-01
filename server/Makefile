@@ -105,6 +105,10 @@ browser-stop:
 	ssh -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/browser-head stop
 .PHONY: browser-stop
 
+eval:
+	OPENCODE_URL=http://$(ADDRESS):4096 OPENCODE_DIR=$(USER_HOME)/workspace pytest tests/persona_eval.py -v
+.PHONY: eval
+
 webui:
 	open http://$(ADDRESS):4096/
 .PHONY: webui

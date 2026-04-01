@@ -15,6 +15,8 @@ ISO_DT_DESC = "ISO 8601 datetime with timezone offset (e.g. 2026-04-01T09:00:00.
 ISO_DUR_DESC = "ISO 8601 duration (e.g. P1D, P1W, P1M, P1Y, PT1H, PT30M)"
 AGENT_MARKER = "<~ PERSONA AGENT MARKER ~>"
 DEFAULT_READ_LIMIT = 2000
+TASKS_TRAIT = ".tasks.json"
+TASK_COMMENTS_TRAIT = ".tasks_comments.jsonl"
 
 class HookResult(TypedDict, total=False):
     system: list[str]
@@ -51,6 +53,19 @@ def tool(fn=None, *, permission=None):
 # emit a JSONL log line to stdout (picked up by the plugin)
 def debug(msg):
     print(json.dumps({"log": f"[{AVATAR}] {msg}"}), flush=True)
+
+def result_ok(extra=None):
+    """structured success response."""
+    r = {"success": True}
+    if extra:
+        r.update(extra)
+    return json.dumps(r)
+
+def result_err(msg):
+    """structured error response."""
+    return json.dumps({"error": msg})
+
+# --- trait helpers ---
 
 # trait visibility: ALLCAPS = inlined in system prompt (letters, digits, _, .),
 # lowercase = listed (read on demand), .hidden = unlisted
@@ -99,7 +114,7 @@ def format_trait(name):
         content = trait_path(name).read_text()
     except FileNotFoundError:
         content = "(empty)"
-    return f"\n{{file:{TRAITS}/{name}}}\n{content}\n"
+    return f"\n{{trait:{name}}}\n{content}\n"
 
 # compose system prompt from preamble, mode-specific prompt, traits, and env
 def system_prompt(mode=None):
@@ -109,8 +124,11 @@ def system_prompt(mode=None):
     parts += [format_trait(t) for t in core_trait_names()]
     listed = listed_trait_names()
     if listed:
-        parts.append(f"\nadditional traits (use trait_read to view): {', '.join(listed)}\n")
+        formatted = ", ".join(f"{{trait:{n}}}" for n in listed)
+        parts.append(f"\nadditional traits (use trait_read to view): {formatted}\n")
     return ["".join(parts)]
+
+# --- trait tools ---
 
 @tool
 def trait_list(
@@ -119,7 +137,8 @@ def trait_list(
     """list all traits of the persona, including those in subdirectories (shown as relative paths)"""
     show_hidden = str(include_hidden).lower() == "true"
     names = trait_names(include_hidden=show_hidden)
-    return {"result": f"{AVATAR} available traits: {', '.join(names)}"}
+    formatted = ", ".join(f"{{trait:{n}}}" for n in names)
+    return {"result": f"available traits: {formatted}"}
 
 @tool(permission={"arg": "trait"})
 def trait_read(
@@ -131,7 +150,7 @@ def trait_read(
     try:
         path = trait_path(trait)
     except ValueError as e:
-        return {"result": f"{AVATAR} invalid trait: {e}"}
+        return {"result": result_err(str(e))}
     try:
         content = path.read_text()
     except FileNotFoundError:
@@ -140,8 +159,8 @@ def trait_read(
     start = int(offset) - 1 if offset else 0
     end = start + (int(limit) if limit else DEFAULT_READ_LIMIT)
     sliced = lines[start:end]
-    header = f"\n{{file:{TRAITS}/{trait}}}\n"
-    return {"result": f"{AVATAR} {header}" + "\n".join(sliced)}
+    header = f"\n{{trait:{trait}}}\n"
+    return {"result": header + "\n".join(sliced)}
 
 @tool(permission={"arg": "trait"})
 def trait_write(
@@ -152,10 +171,10 @@ def trait_write(
     try:
         path = trait_path(trait)
     except ValueError as e:
-        return {"result": f"{AVATAR} invalid trait: {e}"}
+        return {"result": result_err(str(e))}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
-    return {"result": f"{AVATAR} successfully wrote {trait}", "modified": [trait],
+    return {"result": result_ok(), "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool(permission={"arg": "trait"})
@@ -169,18 +188,18 @@ def trait_edit(
     try:
         path = trait_path(trait)
     except ValueError as e:
-        return {"result": f"{AVATAR} invalid trait: {e}"}
+        return {"result": result_err(str(e))}
     content = path.read_text()
     n = content.count(oldString)
     if n == 0:
-        return {"result": f"{AVATAR} failed: oldString not found"}
+        return {"result": result_err("oldString not found")}
     if n > 1 and str(replaceAll).lower() != "true":
-        return {"result": f"{AVATAR} failed: {n} matches for oldString, expected 1 (use replaceAll to replace all)"}
+        return {"result": result_err(f"{n} matches for oldString, expected 1 (use replaceAll to replace all)")}
     if str(replaceAll).lower() == "true":
         path.write_text(content.replace(oldString, newString))
     else:
         path.write_text(content.replace(oldString, newString, 1))
-    return {"result": f"{AVATAR} successfully edited {trait}", "modified": [trait],
+    return {"result": result_ok(), "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool(permission={"arg": "trait"})
@@ -191,12 +210,12 @@ def trait_delete(
     try:
         path = trait_path(trait)
     except ValueError as e:
-        return {"result": f"{AVATAR} invalid trait: {e}"}
+        return {"result": result_err(str(e))}
     if not path.exists():
-        return {"result": f"{AVATAR} not found: {trait}"}
+        return {"result": result_err(f"not found: {trait}")}
     path.unlink()
     cleanup_empty_parents(path)
-    return {"result": f"{AVATAR} successfully deleted {trait}", "modified": [trait],
+    return {"result": result_ok(), "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool(permission={"arg": ["old_trait", "new_trait"]})
@@ -209,15 +228,15 @@ def trait_move(
         src = trait_path(old_trait)
         dst = trait_path(new_trait)
     except ValueError as e:
-        return {"result": f"{AVATAR} invalid trait: {e}"}
+        return {"result": result_err(str(e))}
     if not src.exists():
-        return {"result": f"{AVATAR} not found: {old_trait}"}
+        return {"result": result_err(f"not found: {old_trait}")}
     if dst.exists():
-        return {"result": f"{AVATAR} already exists: {new_trait}"}
+        return {"result": result_err(f"already exists: {new_trait}")}
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
     cleanup_empty_parents(src)
-    return {"result": f"{AVATAR} moved {old_trait} -> {new_trait}", "modified": [old_trait, new_trait],
+    return {"result": result_ok(), "modified": [old_trait, new_trait],
             "notify": [{"type": "trait_changed", "files": [old_trait, new_trait]}]}
 
 # --- generic structured data tools (.json traits) ---
@@ -314,18 +333,107 @@ def save_json_trait(name, data):
     path = trait_path(name)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
+# --- MongoDB-style filter evaluator ---
+
+def _match_condition(value, condition):
+    """evaluate a single field condition against a value."""
+    if not isinstance(condition, dict):
+        # bare value = exact match
+        return value == condition
+    for op, operand in condition.items():
+        if op == "$in":
+            if value not in operand:
+                return False
+        elif op == "$not":
+            if value == operand:
+                return False
+        elif op == "$lt":
+            if value is None or value >= operand:
+                return False
+        elif op == "$lte":
+            if value is None or value > operand:
+                return False
+        elif op == "$gt":
+            if value is None or value <= operand:
+                return False
+        elif op == "$gte":
+            if value is None or value < operand:
+                return False
+        elif op == "$regex":
+            if value is None or not re.search(operand, str(value)):
+                return False
+        else:
+            return False
+    return True
+
+def _match_filter(entry_id, entry, filter_obj):
+    """evaluate a MongoDB-style filter against a dict-of-dicts entry."""
+    if not isinstance(filter_obj, dict):
+        return True
+    for key, condition in filter_obj.items():
+        if key == "$or":
+            if not any(_match_filter(entry_id, entry, clause) for clause in condition):
+                return False
+        elif key == "id":
+            if not _match_condition(entry_id, condition):
+                return False
+        else:
+            if not _match_condition(entry.get(key), condition):
+                return False
+    return True
+
+def _match_record_filter(record, filter_obj):
+    """evaluate a MongoDB-style filter against a flat record (JSONL)."""
+    if not isinstance(filter_obj, dict):
+        return True
+    for key, condition in filter_obj.items():
+        if key == "$or":
+            if not any(_match_record_filter(record, clause) for clause in condition):
+                return False
+        else:
+            if not _match_condition(record.get(key), condition):
+                return False
+    return True
+
+# --- data tools (.json) ---
+
 @tool(permission={"arg": "trait"})
-def data_read(
+def data_query(
     trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
-    key: Annotated[str, param("dot-path selector (e.g. mykey, nested.key, arr.0)", optional=True)] = "",
+    key: Annotated[str, param("dot-path selector (e.g. mykey, nested.key, arr.0). applied before filter", optional=True)] = "",
+    filter: Annotated[object, param("MongoDB-style filter. exact: {\"status\": \"open\"}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or. top-level keys are AND. \"id\" matches dict keys", type="object", optional=True)] = None,
+    fields: Annotated[object, param("array of field names to include in output (e.g. [\"title\", \"status\"]). omit for all fields", type="array", optional=True)] = None,
+    limit: Annotated[str, param("max entries to return (default 50, applied after filter)", optional=True)] = "50",
+    offset: Annotated[str, param("skip first N entries (default 0)", optional=True)] = "0",
 ) -> HookResult:
-    """read structured data from a .json trait, optionally at a dot-path key"""
+    """query structured data from a .json trait. without key, operates on the whole file. on dict-of-dicts, supports MongoDB-style filter on values with id matching on keys"""
     try:
         data = load_json_trait(trait)
-        result = get_at_key(data, key) if key else data
-        return {"result": f"{AVATAR} {json.dumps(result, indent=2, ensure_ascii=False)}"}
+        selected = get_at_key(data, key) if key else data
+        # dict-of-dicts: apply filter, pagination, fields projection
+        if isinstance(selected, dict) and filter is not None or (
+            isinstance(selected, dict) and (fields is not None or int(limit) < len(selected) or int(offset) != 0)
+            and all(isinstance(v, dict) for v in selected.values())
+        ):
+            filtered = {k: v for k, v in selected.items() if _match_filter(k, v, filter)}
+            items = list(filtered.items())
+            start = int(offset)
+            end = start + int(limit)
+            if start < 0 and end >= 0:
+                end = None
+            page = dict(items[start:end])
+            if fields is not None and isinstance(fields, list):
+                page = {k: {f: v[f] for f in fields if f in v} for k, v in page.items()}
+            return {"result": json.dumps(page, indent=2, ensure_ascii=False)}
+        # non-dict or no filter/pagination: return as-is
+        if isinstance(selected, dict) and filter is not None:
+            filtered = {k: v for k, v in selected.items() if _match_filter(k, v, filter)}
+            return {"result": json.dumps(filtered, indent=2, ensure_ascii=False)}
+        return {"result": json.dumps(selected, indent=2, ensure_ascii=False)}
     except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
+    except re.error as e:
+        return {"result": result_err(f"invalid regex: {e}")}
 
 @tool(permission={"arg": "trait"})
 def data_update(
@@ -344,12 +452,12 @@ def data_update(
         else:
             data, ok = set_at_key(data, key, value)
             if not ok:
-                return {"result": f"{AVATAR} failed: key not reachable: {key}"}
+                return {"result": result_err(f"key not reachable: {key}")}
             save_json_trait(trait, data)
-        return {"result": f"{AVATAR} successfully updated {trait}", "modified": [trait],
+        return {"result": result_ok(), "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
     except ValueError as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
 
 @tool(permission={"arg": "trait"})
 def data_delete(
@@ -361,12 +469,12 @@ def data_delete(
         data = load_json_trait(trait)
         data, ok = delete_at_key(data, key)
         if not ok:
-            return {"result": f"{AVATAR} failed: key not found: {key}"}
+            return {"result": result_err(f"key not found: {key}")}
         save_json_trait(trait, data)
-        return {"result": f"{AVATAR} successfully deleted {key} from {trait}", "modified": [trait],
+        return {"result": result_ok(), "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
     except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
 
 @tool(permission={"arg": "trait"})
 def data_append(
@@ -382,12 +490,42 @@ def data_append(
             data = []
         data, ok = append_at_key(data, key, value)
         if not ok:
-            return {"result": f"{AVATAR} failed: target is not an array"}
+            return {"result": result_err("target is not an array")}
         save_json_trait(trait, data)
-        return {"result": f"{AVATAR} successfully appended to {trait}", "modified": [trait],
+        return {"result": result_ok(), "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
     except ValueError as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
+
+@tool(permission={"arg": "trait"})
+def data_count(
+    trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
+    field: Annotated[str, param("if set, count unique values for this field instead of field names", optional=True)] = "",
+    filter: Annotated[object, param("MongoDB-style filter (same syntax as data_query)", type="object", optional=True)] = None,
+) -> HookResult:
+    """count entries in a dict-of-dicts .json trait. without field: returns entry count + per-field occurrence counts. with field: returns unique value counts for that field"""
+    try:
+        data = load_json_trait(trait)
+        if not isinstance(data, dict):
+            return {"result": result_err(f"{trait} is not a dict-of-dicts")}
+        entries = {k: v for k, v in data.items() if _match_filter(k, v, filter)}
+        if field:
+            values: dict[str, int] = {}
+            for v in entries.values():
+                if isinstance(v, dict):
+                    fv = v.get(field)
+                    if fv is not None:
+                        key = str(fv)
+                        values[key] = values.get(key, 0) + 1
+            return {"result": json.dumps({"count": len(entries), "field": field, "values": values})}
+        field_counts: dict[str, int] = {}
+        for v in entries.values():
+            if isinstance(v, dict):
+                for k in v:
+                    field_counts[k] = field_counts.get(k, 0) + 1
+        return {"result": json.dumps({"count": len(entries), "fields": field_counts})}
+    except (ValueError, FileNotFoundError) as e:
+        return {"result": result_err(str(e))}
 
 # --- generic record tools (.jsonl traits) ---
 
@@ -405,38 +543,6 @@ def append_record(name, record):
     with open(path, "a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-@tool(permission={"arg": "trait"})
-def record_append(
-    trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
-    fields: Annotated[object, param("record fields as a JSON object", type="object")] = None,
-) -> HookResult:
-    """append a timestamped record to a .jsonl trait"""
-    try:
-        if not trait.endswith(".jsonl"):
-            return {"result": f"{AVATAR} error: trait must have .jsonl extension"}
-        trait_path(trait)  # validate path
-        record = {"timestamp": format_iso(datetime.now(timezone.utc))}
-        if isinstance(fields, dict):
-            record.update(fields)
-        append_record(trait, record)
-        return {"result": f"{AVATAR} successfully appended to {trait}", "modified": [trait],
-                "notify": [{"type": "trait_changed", "files": [trait]}]}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
-
-def _filter_records(records, filter=None, pattern=None, after=None, before=None, date_field="timestamp"):
-    """apply filter, pattern, and date range to a list of records."""
-    if isinstance(filter, dict):
-        records = [r for r in records if all(r.get(k) == v for k, v in filter.items())]
-    if pattern:
-        regex = re.compile(pattern)
-        records = [r for r in records if regex.search(json.dumps(r, ensure_ascii=False))]
-    if after:
-        records = [r for r in records if date_field in r and r[date_field] > after]
-    if before:
-        records = [r for r in records if date_field in r and r[date_field] < before]
-    return records
-
 def _stable_sort_record(record):
     """sort record keys alphabetically, id first."""
     keys = sorted(record.keys())
@@ -445,74 +551,79 @@ def _stable_sort_record(record):
     return {k: record[k] for k in keys}
 
 @tool(permission={"arg": "trait"})
-def record_list(
+def record_append(
     trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
-    filter: Annotated[object, param("exact field matching, e.g. {\"type\": \"note\"}", type="object", optional=True)] = None,
-    pattern: Annotated[str, param("regex pattern to match against each record line", optional=True)] = "",
+    fields: Annotated[object, param("record fields as a JSON object", type="object")] = None,
+) -> HookResult:
+    """append a timestamped record to a .jsonl trait"""
+    try:
+        if not trait.endswith(".jsonl"):
+            return {"result": result_err("trait must have .jsonl extension")}
+        trait_path(trait)  # validate path
+        record = {"timestamp": format_iso(datetime.now(timezone.utc))}
+        if isinstance(fields, dict):
+            record.update(fields)
+        append_record(trait, record)
+        return {"result": result_ok(), "modified": [trait],
+                "notify": [{"type": "trait_changed", "files": [trait]}]}
+    except (ValueError, FileNotFoundError) as e:
+        return {"result": result_err(str(e))}
+
+@tool(permission={"arg": "trait"})
+def record_query(
+    trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
+    filter: Annotated[object, param("MongoDB-style filter. exact: {\"type\": \"note\"}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or. top-level keys are AND", type="object", optional=True)] = None,
+    fields: Annotated[object, param("array of field names to include in output (e.g. [\"type\", \"content\"]). omit for all fields", type="array", optional=True)] = None,
     limit: Annotated[str, param("max records to return (default 50)", optional=True)] = "50",
     offset: Annotated[str, param("skip first N records, negative counts from end (default 0, oldest first)", optional=True)] = "0",
-    after: Annotated[str, param(f"filter: only records after this {ISO_DT_DESC}", optional=True)] = "",
-    before: Annotated[str, param(f"filter: only records before this {ISO_DT_DESC}", optional=True)] = "",
-    date_field: Annotated[str, param("field for after/before filtering (default: timestamp)", optional=True)] = "timestamp",
 ) -> HookResult:
-    """list records from a .jsonl trait with optional filtering. use persona_record_fields to discover field names and values"""
+    """query records from a .jsonl trait with MongoDB-style filtering and pagination"""
     try:
-        records = _filter_records(load_records(trait), filter, pattern, after, before, date_field)
+        records = load_records(trait)
+        filtered = [r for r in records if _match_record_filter(r, filter)]
         start = int(offset)
         end = start + int(limit)
         if start < 0 and end >= 0:
             end = None
-        page = records[start:end]
-        return {"result": f"{AVATAR} {len(page)}/{len(records)} records:\n" +
-                "\n".join(json.dumps(_stable_sort_record(r), ensure_ascii=False) for r in page)}
+        page = filtered[start:end]
+        if fields is not None and isinstance(fields, list):
+            page = [{f: r[f] for f in fields if f in r} for r in page]
+        else:
+            page = [_stable_sort_record(r) for r in page]
+        return {"result": f"{len(page)}/{len(filtered)} records:\n" +
+                "\n".join(json.dumps(r, ensure_ascii=False) for r in page)}
     except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
     except re.error as e:
-        return {"result": f"{AVATAR} invalid regex: {e}"}
+        return {"result": result_err(f"invalid regex: {e}")}
 
 @tool(permission={"arg": "trait"})
 def record_count(
     trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
-    filter: Annotated[object, param("exact field matching, e.g. {\"type\": \"note\"}", type="object", optional=True)] = None,
-    date_field: Annotated[str, param("field for after/before filtering (default: timestamp)", optional=True)] = "timestamp",
+    field: Annotated[str, param("if set, count unique values for this field instead of field names", optional=True)] = "",
+    filter: Annotated[object, param("MongoDB-style filter (same syntax as record_query)", type="object", optional=True)] = None,
 ) -> HookResult:
-    """count records in a .jsonl trait"""
-    try:
-        records = _filter_records(load_records(trait), filter, date_field=date_field)
-        return {"result": f"{AVATAR} {len(records)} records"}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
-
-@tool(permission={"arg": "trait"})
-def record_fields(
-    trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
-    field: Annotated[str, param("if set, list unique values for this field instead of field names", optional=True)] = "",
-) -> HookResult:
-    """list unique field names across all records, or unique values for a specific field"""
+    """count records in a .jsonl trait. without field: returns record count + per-field occurrence counts. with field: returns unique value counts for that field"""
     try:
         records = load_records(trait)
+        filtered = [r for r in records if _match_record_filter(r, filter)]
         if field:
-            counts: dict[str, int] = {}
-            for r in records:
+            values: dict[str, int] = {}
+            for r in filtered:
                 v = r.get(field)
                 if v is not None:
                     key = str(v)
-                    counts[key] = counts.get(key, 0) + 1
-            lines = [f"{k}: {c}" for k, c in counts.items()]
-            return {"result": f"{AVATAR} {len(counts)} unique values for \"{field}\":\n" + "\n".join(lines)}
-        counts = {}
-        for r in records:
+                    values[key] = values.get(key, 0) + 1
+            return {"result": json.dumps({"count": len(filtered), "field": field, "values": values})}
+        field_counts: dict[str, int] = {}
+        for r in filtered:
             for k in r:
-                counts[k] = counts.get(k, 0) + 1
-        lines = [f"{k}: {c}" for k, c in counts.items()]
-        return {"result": f"{AVATAR} {len(counts)} fields ({len(records)} records):\n" + "\n".join(lines)}
+                field_counts[k] = field_counts.get(k, 0) + 1
+        return {"result": json.dumps({"count": len(filtered), "fields": field_counts})}
     except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
 
 # --- task tools (fixed trait: .tasks.json) ---
-
-TASKS_TRAIT = ".tasks.json"
-TASK_COMMENTS_TRAIT = ".tasks_comments.jsonl"
 
 # canonical format: UTC with +00:00 offset, millisecond precision
 # matches evolve_datetime tool output (e.g. 2026-04-01T09:00:00.000+00:00)
@@ -549,73 +660,6 @@ def load_tasks():
 def save_tasks(data):
     save_json_trait(TASKS_TRAIT, data)
 
-@tool(permission={"arg": "trait"})
-def data_list(
-    trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
-    filter: Annotated[object, param("exact field matching, e.g. {\"status\": \"open\"}", type="object", optional=True)] = None,
-    pattern: Annotated[str, param("regex pattern to match against each record", optional=True)] = "",
-    limit: Annotated[str, param("max records to return (default 50)", optional=True)] = "50",
-    offset: Annotated[str, param("skip first N records, negative counts from end (default 0)", optional=True)] = "0",
-    after: Annotated[str, param(f"filter: only records after this {ISO_DT_DESC}", optional=True)] = "",
-    before: Annotated[str, param(f"filter: only records before this {ISO_DT_DESC}", optional=True)] = "",
-    date_field: Annotated[str, param("field for after/before filtering (default: timestamp)", optional=True)] = "timestamp",
-    fields: Annotated[str, param("comma-separated fields to include (default: all). id is always included", optional=True)] = "",
-) -> HookResult:
-    """list entries from a .json dict trait with filtering and pagination. each entry gets an id from its key"""
-    try:
-        data = load_json_trait(trait)
-        if not isinstance(data, dict):
-            return {"result": f"{AVATAR} error: {trait} is not an object"}
-        records = [{"id": k, **v} for k, v in data.items()]
-        records = _filter_records(records, filter, pattern, after, before, date_field)
-        start = int(offset)
-        end = start + int(limit)
-        if start < 0 and end >= 0:
-            end = None
-        page = records[start:end]
-        include = {f.strip() for f in fields.split(",") if f.strip()} if fields else None
-        def _format(r):
-            r = _stable_sort_record(r)
-            if include:
-                r = {k: v for k, v in r.items() if k == "id" or k in include}
-            return json.dumps(r, ensure_ascii=False)
-        return {"result": f"{AVATAR} {len(page)}/{len(records)} records:\n" +
-                "\n".join(_format(r) for r in page)}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
-    except re.error as e:
-        return {"result": f"{AVATAR} invalid regex: {e}"}
-
-@tool
-def task_list(
-    filter: Annotated[object, param("exact field matching, e.g. {\"status\": \"open\", \"owner\": \"tom\"}", type="object", optional=True)] = None,
-    pattern: Annotated[str, param("regex pattern to match against each task", optional=True)] = "",
-    limit: Annotated[str, param("max tasks to return (default 50)", optional=True)] = "50",
-    offset: Annotated[str, param("skip first N tasks, negative counts from end (default 0)", optional=True)] = "0",
-    after: Annotated[str, param(f"filter: only tasks after this {ISO_DT_DESC}", optional=True)] = "",
-    before: Annotated[str, param(f"filter: only tasks before this {ISO_DT_DESC}", optional=True)] = "",
-    date_field: Annotated[str, param("field for after/before filtering (default: due). use created/updated to filter by those dates", optional=True)] = "due",
-    fields: Annotated[str, param("comma-separated fields to include (default: all). id is always included", optional=True)] = "",
-) -> HookResult:
-    """list tasks. common filters: filter={\"status\": \"open\"}, before/after filter on due date by default"""
-    return data_list(trait=TASKS_TRAIT, filter=filter, pattern=pattern,
-                     limit=limit, offset=offset, after=after, before=before,
-                     date_field=date_field, fields=fields)
-
-@tool(permission={"arg": "id"})
-def task_read(
-    id: Annotated[str, "task UUID"],
-) -> HookResult:
-    """read full details of a task by UUID, including description"""
-    try:
-        tasks = load_tasks()
-        if id not in tasks:
-            return {"result": f"{AVATAR} not found: {id}"}
-        record = _stable_sort_record({"id": id, **tasks[id]})
-        return {"result": f"{AVATAR} task:\n{json.dumps(record, ensure_ascii=False)}"}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
-
 @tool
 def task_create(
     title: Annotated[str, "task title"],
@@ -629,13 +673,13 @@ def task_create(
     try:
         tasks = load_tasks()
         if not isinstance(tasks, dict):
-            return {"result": f"{AVATAR} error: {TASKS_TRAIT} is not an object"}
+            return {"result": result_err(f"{TASKS_TRAIT} is not an object")}
         if due:
             validate_iso_datetime(due)
         if interval:
             parse_iso_duration(interval)
             if not due:
-                return {"result": f"{AVATAR} error: interval requires a due date"}
+                return {"result": result_err("interval requires a due date")}
         task_id = str(uuid.uuid4())
         now = format_iso(datetime.now(timezone.utc))
         task = {"title": title, "status": status, "created": now, "updated": now}
@@ -649,17 +693,17 @@ def task_create(
             task["interval"] = interval
         tasks[task_id] = task
         save_tasks(tasks)
-        return {"result": f"{AVATAR} created task {task_id}: {title}", "modified": [TASKS_TRAIT],
+        return {"result": result_ok({"id": task_id}), "modified": [TASKS_TRAIT],
                 "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT]}]}
     except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
 
 @tool(permission={"arg": "id"})
 def task_update(
     id: Annotated[str, "task UUID"],
     title: Annotated[str, param("new title", optional=True)] = "",
     description: Annotated[str, param("new description", optional=True)] = "",
-    status: Annotated[str, param("new status. never mark recurring tasks as done — use persona_task_comment instead", optional=True)] = "",
+    status: Annotated[str, param("new status", optional=True)] = "",
     due: Annotated[str, param(f"new due date as {ISO_DT_DESC}. for recurring tasks, prefer persona_task_comment to auto-bump due by interval", optional=True)] = "",
     interval: Annotated[str, param(f"recurrence as {ISO_DUR_DESC}. requires due", optional=True)] = "",
     fields: Annotated[object, param("arbitrary extra fields to set, e.g. {\"owner\": \"tom\", \"cc\": \"alice\"}", type="object", optional=True)] = None,
@@ -668,7 +712,7 @@ def task_update(
     try:
         tasks = load_tasks()
         if id not in tasks:
-            return {"result": f"{AVATAR} not found: {id}"}
+            return {"result": result_err(f"not found: {id}")}
         if isinstance(fields, dict):
             tasks[id].update(fields)
         if due:
@@ -677,47 +721,20 @@ def task_update(
         if interval:
             parse_iso_duration(interval)
             if not tasks[id].get("due") and not due:
-                return {"result": f"{AVATAR} error: interval requires a due date"}
+                return {"result": result_err("interval requires a due date")}
             tasks[id]["interval"] = interval
         if title:
             tasks[id]["title"] = title
         if description:
             tasks[id]["description"] = description
-        # recurring tasks: bump due instead of marking done
-        if status == "done" and tasks[id].get("interval") and tasks[id].get("due"):
-            old_due = validate_iso_datetime(tasks[id]["due"])
-            delta = parse_iso_duration(tasks[id]["interval"])
-            tasks[id]["due"] = format_iso(old_due + delta)
-            tasks[id]["status"] = "open"
-            tasks[id]["updated"] = format_iso(datetime.now(timezone.utc))
-            save_tasks(tasks)
-            return {"result": f"{AVATAR} bumped due for recurring task {id} (due: {tasks[id]['due']})",
-                    "modified": [TASKS_TRAIT],
-                    "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT]}]}
         if status:
             tasks[id]["status"] = status
         tasks[id]["updated"] = format_iso(datetime.now(timezone.utc))
         save_tasks(tasks)
-        return {"result": f"{AVATAR} updated task {id}", "modified": [TASKS_TRAIT],
+        return {"result": result_ok(), "modified": [TASKS_TRAIT],
                 "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT]}]}
     except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
-
-@tool(permission={"arg": "id"})
-def task_delete(
-    id: Annotated[str, "task UUID"],
-) -> HookResult:
-    """delete a task by UUID"""
-    try:
-        tasks = load_tasks()
-        if id not in tasks:
-            return {"result": f"{AVATAR} not found: {id}"}
-        del tasks[id]
-        save_tasks(tasks)
-        return {"result": f"{AVATAR} deleted task {id}", "modified": [TASKS_TRAIT],
-                "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT]}]}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
+        return {"result": result_err(str(e))}
 
 @tool(permission={"arg": "id"})
 def task_comment(
@@ -727,75 +744,26 @@ def task_comment(
     """log work done on a task. for recurring tasks, auto-bumps due by interval"""
     try:
         if not text:
-            return {"result": f"{AVATAR} error: text is required"}
+            return {"result": result_err("text is required")}
         tasks = load_tasks()
         if id not in tasks:
-            return {"result": f"{AVATAR} not found: {id}"}
+            return {"result": result_err(f"not found: {id}")}
         now = format_iso(datetime.now(timezone.utc))
         record = {"timestamp": now, "task_id": id, "text": text}
         append_record(TASK_COMMENTS_TRAIT, record)
         tasks[id]["updated"] = now
         # recurring: bump due on comment
-        msg = f"{AVATAR} comment added to task {id}"
+        extra = {}
         if tasks[id].get("interval") and tasks[id].get("due"):
             old_due = validate_iso_datetime(tasks[id]["due"])
             delta = parse_iso_duration(tasks[id]["interval"])
             tasks[id]["due"] = format_iso(old_due + delta)
-            msg += f", bumped due to {tasks[id]['due']}"
+            extra["due"] = tasks[id]["due"]
         save_tasks(tasks)
-        return {"result": msg, "modified": [TASKS_TRAIT, TASK_COMMENTS_TRAIT],
+        return {"result": result_ok(extra), "modified": [TASKS_TRAIT, TASK_COMMENTS_TRAIT],
                 "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT, TASK_COMMENTS_TRAIT]}]}
     except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
-
-# --- journal tools (fixed trait: .journal.jsonl) ---
-
-JOURNAL_TRAIT = ".journal.jsonl"
-
-@tool(permission={"arg": "type"})
-def journal_append(
-    type: Annotated[str, "entry type (e.g. note, observation, decision, event)"],
-    content: Annotated[str, "entry content"],
-    fields: Annotated[object, param("additional fields (recommended: severity, tags, related)", type="object", optional=True)] = None,
-) -> HookResult:
-    """append a timestamped entry to the journal"""
-    try:
-        if not type:
-            return {"result": f"{AVATAR} error: type is required"}
-        if not content:
-            return {"result": f"{AVATAR} error: content is required"}
-        trait_path(JOURNAL_TRAIT)
-        record = {"timestamp": format_iso(datetime.now(timezone.utc)), "type": type, "content": content}
-        if isinstance(fields, dict):
-            record.update(fields)
-        append_record(JOURNAL_TRAIT, record)
-        return {"result": f"{AVATAR} journal entry recorded", "modified": [JOURNAL_TRAIT],
-                "notify": [{"type": "trait_changed", "files": [JOURNAL_TRAIT]}]}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": f"{AVATAR} error: {e}"}
-
-@tool
-def journal_list(
-    filter: Annotated[object, param("exact field matching, e.g. {\"type\": \"note\"}", type="object", optional=True)] = None,
-    pattern: Annotated[str, param("regex pattern to match against each entry", optional=True)] = "",
-    limit: Annotated[str, param("max entries to return (default 50)", optional=True)] = "50",
-    offset: Annotated[str, param("skip first N entries, negative counts from end (default 0, oldest first)", optional=True)] = "0",
-    after: Annotated[str, param(f"only entries after this {ISO_DT_DESC}", optional=True)] = "",
-    before: Annotated[str, param(f"only entries before this {ISO_DT_DESC}", optional=True)] = "",
-    date_field: Annotated[str, param("field for after/before filtering (default: timestamp)", optional=True)] = "timestamp",
-) -> HookResult:
-    """list journal entries in chronological order with optional filtering"""
-    return record_list(trait=JOURNAL_TRAIT, filter=filter, pattern=pattern,
-                       limit=limit, offset=offset, after=after, before=before,
-                       date_field=date_field)
-
-@tool
-def journal_count(
-    filter: Annotated[object, param("exact field matching, e.g. {\"type\": \"note\"}", type="object", optional=True)] = None,
-    date_field: Annotated[str, param("field for after/before filtering (default: timestamp)", optional=True)] = "timestamp",
-) -> HookResult:
-    """count journal entries"""
-    return record_count(trait=JOURNAL_TRAIT, filter=filter, date_field=date_field)
+        return {"result": result_err(str(e))}
 
 # generate tool definitions from @tool-decorated functions via Annotated metadata
 def tool_defs():
@@ -899,7 +867,7 @@ def execute_tool(ctx: dict) -> HookResult:
     handler = TOOLS.get(name)
     if not handler:
         debug(f"unknown tool: {name}")
-        return {"result": f"{AVATAR} unknown tool: {name}"}
+        return {"result": result_err(f"unknown tool: {name}")}
     args = ctx.get("args", {})
     debug(f"tool={name} args={list(args.keys())}")
     try:
@@ -908,7 +876,7 @@ def execute_tool(ctx: dict) -> HookResult:
         return result
     except Exception as e:
         debug(f"tool={name} error: {e}")
-        return {"result": f"{AVATAR} tool error: {e}"}
+        return {"result": result_err(f"tool error: {e}")}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

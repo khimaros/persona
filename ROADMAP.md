@@ -1,9 +1,6 @@
 # ROADMAP
 
 ```
-[@] enable default ask and whitelist allow for browser-use
-
-[@] trait tools: directory cleanup on delete/move, auto-create dirs on write/move
 [ ] create tools for editing agents/per.md frontmatter
     [ ] permission_add("bash", "cat /etc/*", "ask")
     [ ] permission_remove("bash", "cat /etc/*", "ask")
@@ -15,7 +12,10 @@
     [~] patch("~/.config/opencode/plugins/persona.ts", oldString, newString)
     [~] patch("~/.config/opencode/tools/persona.ts", oldString, newString)
 [ ] speech-to-text and text-to-speech for chats
+[~] enable default ask and whitelist allow for browser-use
+[~] immutable system prompt + one-round-delay notification messages
 
+[x] trait tools: directory cleanup on delete/move, auto-create dirs on write/move
 [x] task comments: add comments field, task_comment tool
 [x] switch browser-use open --new-tab to separate new-tab and open calls (code and skill)
 [x] allow pushing dev branch of browser-use manually into guest
@@ -35,7 +35,7 @@
 [x] send heartbeat messages to LLM in dedicated session
 [x] send proactive follow-ups to active per sessions
 [x] install forked browser-use
-[@] immutable system prompt + one-round-delay notification messages
+[x] MongoDB-style filters, structured output, {trait:} format, no avatar prefix
 [x] add trait edit diffs to debug log
 [x] version traits with git and commit after each change
 [x] always ask permission for changes to core.md trait

@@ -9,30 +9,29 @@ it over time, or write it as prose?"
 - persona_data_* (.json) — structured state with dot-path access. use when i
   need to read or update individual fields without touching the rest:
   configuration, counters, settings, key-value lookups, structured profiles.
-  supports nested get/set/delete and array append. auto-creates the trait on
-  first write.
+  supports nested get/set/delete, array append, and MongoDB-style queries on
+  dict-of-dicts. auto-creates the trait on first write.
 
 - persona_record_* (.jsonl) — append-only timestamped logs. use when entries
   accumulate over time and are never modified: events, observations, journal
   entries, measurements. each append gets an automatic UTC timestamp. supports
-  filtering by field values, date range, regex pattern, and pagination. use
-  persona_record_fields to discover field names and unique values. auto-creates
-  the trait on first append.
+  MongoDB-style filtering, pagination, and field introspection via
+  persona_record_count. auto-creates the trait on first append.
 
-- persona_task_* (.json) — structured task management. one-off tasks go
-  open → done. recurring tasks (with interval) stay open — use
+conventions for common workflows:
+
+- tasks: stored in .tasks.json as dict-of-dicts. create with
+  persona_task_create, update with persona_task_update, query with
+  persona_data_query on .tasks.json, delete with persona_data_delete on
+  .tasks.json. recurring tasks (with interval) stay open — use
   persona_task_comment to log progress (auto-bumps due by interval).
   phrase task titles as concrete actions ("write ...", "update ...") not
-  observations ("review ...", "think about ..."). use evolve_tool_list
-  for full parameter details.
+  observations ("review ...", "think about ...").
 
-- persona_journal_* (.jsonl) — append-only timestamped journal. use for
-  recording observations, decisions, events, and notes that accumulate over
-  time. unlike generic persona_record_*, this is a single fixed journal with
-  dedicated list and count tools. use evolve_tool_list for full parameter
-  details.
+- journal: stored in .journal.jsonl. append with persona_record_append on
+  .journal.jsonl, query with persona_record_query, count with
+  persona_record_count. use for recording observations, decisions, events,
+  and notes that accumulate over time.
 
 rule of thumb: if the data has fields → persona_data_*. if it grows over time
-→ persona_record_*. if it's best read as a paragraph → persona_trait_*. if
-it's a work item → persona_task_*. if it's a timestamped observation or
-decision → persona_journal_*.
+→ persona_record_*. if it's best read as a paragraph → persona_trait_*.
