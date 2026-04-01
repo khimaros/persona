@@ -94,9 +94,6 @@ def cleanup_empty_parents(path):
 def prompt_path(name):
     return PROMPTS / f"{name}.md"
 
-def prompt_names():
-    return sorted(f.stem for f in PROMPTS.iterdir() if f.is_file() and f.suffix == ".md")
-
 def format_trait(name):
     try:
         content = trait_path(name).read_text()
@@ -224,13 +221,6 @@ def trait_move(
             "notify": [{"type": "trait_changed", "files": [old_trait, new_trait]}]}
 
 # --- generic structured data tools (.json traits) ---
-
-def parse_value(raw):
-    """parse a value: try JSON first, fall back to raw string."""
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return raw
 
 def resolve_key(data, key):
     """walk a dot-path key, returning (parent, final_key, exists)."""
