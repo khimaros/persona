@@ -8,6 +8,7 @@ Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
 EnvironmentFile=-%h/.config/opencode/persona.env
 WorkingDirectory=%h/workspace/
 ExecStart=%h/.local/bin/opencode serve --hostname 0.0.0.0 --port 4096 --print-logs
+ExecStartPost=/bin/bash -c 'sleep 2 && /usr/bin/curl -sf --retry 5 --retry-delay 2 --retry-all-errors "http://localhost:4096/session?directory=%h/workspace/" -o /dev/null &'
 Restart=on-failure
 
 [Install]
