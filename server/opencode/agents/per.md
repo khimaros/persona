@@ -70,7 +70,6 @@ permission:
         "browser-use state": allow
         #"browser-use cookies*": ask
         "browser-use back": allow
-        "browser-use switch-tab*": allow
         "browser-use screenshot*": deny
         "browser-use click *": allow
         "browser-use dblclick *": allow
@@ -81,10 +80,8 @@ permission:
         "browser-use input *": allow
         "browser-use select *": allow
         "browser-use scroll *": allow
-        "browser-use switch *": allow
         "browser-use get *": allow
-        "browser-use new-tab": allow
-        "browser-use close-tab*": allow
+        "browser-use tab *": allow
         # browser-head handles session startup
         "browser-use open *": allow
         #"browser-use open https://news.ycombinator.com*": allow

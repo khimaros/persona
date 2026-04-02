@@ -37,16 +37,17 @@ STOP and ask the user to respond to the captcha before continuing.
 ### Navigation
 | Command | Description |
 | :--- | :--- |
-| `new-tab` | Open a new blank tab |
 | `open <url>` | Navigate to a URL in the current tab |
 | `back` | Go back in history |
-| `switch <tab_id>` | Switch to a specific tab |
-| `close-tab` | Close the current tab |
+| `tab list` | List all open tabs |
+| `tab new [url]` | Open a new tab (optionally with a URL) |
+| `tab switch <index>` | Switch to a specific tab by index |
+| `tab close [index...]` | Close one or more tabs by index |
 
 ### Inspection
 | Command | Description |
 | :--- | :--- |
-| `state` | **CRITICAL**: Get current URL, title, and interactive elements with indices |
+| `state` | Get current URL, title, interactive elements with indices; JS dialogs auto-dismiss and appear here |
 | `screenshot [--full] <path>` | Take a screenshot (base64 if no path) |
 | `get title` | Get page title |
 | `get html` | Get full page HTML |
@@ -78,7 +79,7 @@ STOP and ask the user to respond to the captcha before continuing.
 | `wait selector "css" --state hidden` | Wait for element to disappear |
 | `wait text "string"` | Wait until text appears on page |
 
-**Tip**: Use `eval "window.open('https://example.com', '_blank')"` to open a link in a new tab.
+**Tip**: Use `tab new https://example.com` to open a link in a new tab.
 
 ### Management
 | Command | Description |
@@ -91,7 +92,7 @@ STOP and ask the user to respond to the captcha before continuing.
 
 1.  **`state` vs `get`**: Use `state` to discover interactive elements and their indices before clicking/typing. Use `get text`, `get html`, or `get value` to read content from a specific element you already know the index of. `state` is for *what can I interact with?*, `get` is for *what does this element contain?*
 2.  **Handling Forms**: Use `input <index> "text"` to fill fields, then `click <index>` or `keys Enter` to submit.
-3.  **Opening URLs**: Use  `open <url>` to navigate to a URL in the current tab.
+3.  **Opening URLs**: Use `open <url>` to navigate in the current tab, or `tab new <url>` for a new tab.
 4.  **Troubleshooting**:
     *   **Empty DOM**: If `state` returns an empty tree, the page may be loading. Wait and retry.
     *   **Element not found**: Refresh the indices by running `state` again.
