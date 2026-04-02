@@ -19,10 +19,10 @@ TASKS_TRAIT = ".tasks.json"
 TASK_COMMENTS_TRAIT = ".tasks_comments.jsonl"
 
 # shared parameter descriptions
-FILTER_JSON_DESC = 'MongoDB filter (supported subset). exact: {"status": "open"}, supported operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. top-level keys are AND. "id" matches dict keys'
-FILTER_JSONL_DESC = 'MongoDB filter (supported subset). exact: {"type": "note"}, supported operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. dot-paths for nested fields: {"meta.source": "web"}. top-level keys are AND'
-FIELDS_JSON_DESC = 'projection: plain string names of fields to return (e.g. ["title", "status"]). NOT for filtering. omit to return all fields'
-FIELDS_JSONL_DESC = 'projection: plain string names of fields to return (e.g. ["type", "content"]). NOT for filtering. omit to return all fields'
+FILTER_JSON_DESC = 'MongoDB-style filter object (not a string). exact match: {"status": "open"}, date comparison: {"due": {"$lt": "2100-01-01T00:00:00.000+00:00"}}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. top-level keys are AND. "id" matches dict keys'
+FILTER_JSONL_DESC = 'MongoDB-style filter object (not a string). exact match: {type: "note"}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. dot-paths for nested fields: {"meta.source": "web"}. top-level keys are AND'
+FIELDS_JSON_DESC = 'array of field names to return (not a string). example: ["title", "status"]. NOT for filtering. omit to return all fields'
+FIELDS_JSONL_DESC = 'array of field names to return (not a string). example: ["type", "content"]. NOT for filtering. omit to return all fields'
 TRAIT_JSON_DESC = "trait filename in traits/, must end in .json (e.g. .tasks.json)"
 TRAIT_JSONL_DESC = "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"
 TRAIT_DESC = "trait path in traits/ (e.g. SOUL.md, sub/topic.md, .data.json)"
@@ -432,10 +432,50 @@ def _resolve_dot_path(obj, path):
             return None
     return obj
 
+def _coerce_json(value, expected_type):
+    """parse string-encoded JSON when the LLM sends a string instead of an object/array.
+    fixes mangled quote tokens (<|"|>), unquoted keys, and bracket mismatches."""
+    if isinstance(value, str):
+        cleaned = re.sub(r'<\|"\|>', '"', value)
+        for attempt in [cleaned, _fix_json_structure(cleaned)]:
+            try:
+                parsed = json.loads(attempt)
+                if isinstance(parsed, expected_type):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                continue
+    return value
+
+def _fix_json_structure(s):
+    """attempt to fix common JSON malformations: unquoted keys, ] instead of }."""
+    # quote unquoted keys (word chars or $ prefix before colon)
+    s = re.sub(r'(?<=[{,])\s*(\$?\w+)\s*:', r' "\1":', s)
+    # fix ] used as } by matching open/close bracket balance
+    result, stack = [], []
+    for ch in s:
+        if ch in '{[':
+            stack.append(ch)
+            result.append(ch)
+        elif ch == '}':
+            stack.pop() if stack else None
+            result.append('}')
+        elif ch == ']':
+            if stack and stack[-1] == '{':
+                stack.pop()
+                result.append('}')
+            else:
+                if stack:
+                    stack.pop()
+                result.append(']')
+        else:
+            result.append(ch)
+    return ''.join(result)
+
 def _validate_fields(fields):
     """return fields if valid (None or list of strings), else raise."""
     if fields is None:
         return None
+    fields = _coerce_json(fields, list)
     if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
         raise ValueError(f'fields must be ["name1", "name2"], got: {json.dumps(fields)[:100]}')
     return fields
@@ -467,6 +507,9 @@ def data_query(
 ) -> HookResult:
     """query structured data from a .json trait. without key, operates on the whole file. on dict-of-dicts, supports MongoDB-style filter on values with id matching on keys"""
     try:
+        filter = _coerce_json(filter, dict)
+        if filter is not None and not isinstance(filter, dict):
+            raise ValueError(f'filter must be a JSON object like {{"status": "open"}}, got string: {str(filter)[:80]}')
         fields = _validate_fields(fields)
         data = load_json_trait(trait)
         selected = get_at_key(data, key) if key else data
@@ -561,10 +604,11 @@ def data_append(
 def data_count(
     trait: Annotated[str, TRAIT_JSON_DESC],
     field: Annotated[str, param("group by this field and count occurrences of each unique value (e.g. field='status' → {\"open\": 5, \"done\": 3})", optional=True)] = "",
-    filter: Annotated[object, param("MongoDB-style filter (same syntax as data_query)", type="object", optional=True)] = None,
+    filter: Annotated[object, param(FILTER_JSON_DESC, type="object", optional=True)] = None,
 ) -> HookResult:
     """count entries in a dict-of-dicts .json trait. without field: returns total count and field names. with field: groups by that field and returns count per unique value"""
     try:
+        filter = _coerce_json(filter, dict)
         data = load_json_trait(trait)
         if not isinstance(data, dict):
             return {"result": result_err(f"{trait} is not a dict-of-dicts")}
@@ -645,6 +689,9 @@ def record_query(
 ) -> HookResult:
     """query records from a .jsonl trait with MongoDB-style filtering and pagination"""
     try:
+        filter = _coerce_json(filter, dict)
+        if filter is not None and not isinstance(filter, dict):
+            raise ValueError(f'filter must be a JSON object like {{"status": "open"}}, got string: {str(filter)[:80]}')
         fields = _validate_fields(fields)
         records = load_records(trait)
         filtered = [r for r in records if _match_record_filter(r, filter)]
@@ -668,10 +715,11 @@ def record_query(
 def record_count(
     trait: Annotated[str, TRAIT_JSONL_DESC],
     field: Annotated[str, param("group by this field (supports dot-paths like meta.source) and count occurrences of each unique value (e.g. field='status' → {\"open\": 5, \"done\": 3})", optional=True)] = "",
-    filter: Annotated[object, param("MongoDB-style filter (same syntax as record_query)", type="object", optional=True)] = None,
+    filter: Annotated[object, param(FILTER_JSONL_DESC, type="object", optional=True)] = None,
 ) -> HookResult:
     """count records in a .jsonl trait. without field: returns total count and field names. with field: groups by that field and returns count per unique value"""
     try:
+        filter = _coerce_json(filter, dict)
         records = load_records(trait)
         filtered = [r for r in records if _match_record_filter(r, filter)]
         if field:

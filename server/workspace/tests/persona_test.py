@@ -839,6 +839,45 @@ try:
     parsed = result_json(r)
     check("data_query bad $regex returns error", "error" in parsed, f"got: {parsed}")
 
+    # --- data_query string-coerced filter (LLM sends string instead of object) ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": '{"status": "open"}'})
+    parsed = result_json(r)
+    check("data_query coerced string filter", set(parsed.keys()) == {"id1", "id3"},
+          f"got: {list(parsed.keys())}")
+
+    # --- data_query mangled quote tokens in filter ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": '{<|"|>status<|"|>: <|"|>open<|"|>}'})
+    parsed = result_json(r)
+    check("data_query mangled quote filter", set(parsed.keys()) == {"id1", "id3"},
+          f"got: {list(parsed.keys())}")
+
+    # --- data_query mangled filter with unquoted keys and wrong brackets ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": '{status: <|"|>open<|"|>}'})
+    parsed = result_json(r)
+    check("data_query unquoted keys filter", set(parsed.keys()) == {"id1", "id3"},
+          f"got: {list(parsed.keys())}")
+
+    # --- data_query mangled filter with ]] instead of }} ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": '{due:{$lt:<|"|>2026-04-15T00:00:00.000+00:00<|"|>]}'})
+    parsed = result_json(r)
+    check("data_query bracket mismatch filter", set(parsed.keys()) == {"id1"},
+          f"got: {list(parsed.keys())}")
+
+    # --- data_query unparseable filter returns error ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": "not json at all"})
+    parsed = result_json(r)
+    check("data_query unparseable filter error", "error" in parsed, f"got: {parsed}")
+
     os.remove(os.path.join(tmp, "traits", ".dl.json"))
     os.remove(os.path.join(tmp, "traits", ".test.json"))
 
