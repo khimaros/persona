@@ -20,7 +20,7 @@ persona_template: &persona_instance
       apt -y install adduser
       apt -y install npm
       if ! which google-chrome; then
-        wget -O chrome.deb "${CHROME_URI}"
+        curl -o chrome.deb "${CHROME_URI}"
         apt -y install ./chrome.deb
       fi
     - copy:
@@ -60,4 +60,5 @@ persona_template: &persona_instance
 instances:
   persona: *persona_instance
   persona-dev: *persona_instance
+  persona-eval: *persona_instance
   persona-demo: *persona_instance

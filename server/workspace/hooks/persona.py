@@ -18,6 +18,16 @@ DEFAULT_READ_LIMIT = 2000
 TASKS_TRAIT = ".tasks.json"
 TASK_COMMENTS_TRAIT = ".tasks_comments.jsonl"
 
+# shared parameter descriptions
+FILTER_JSON_DESC = 'MongoDB filter (supported subset). exact: {"status": "open"}, supported operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. top-level keys are AND. "id" matches dict keys'
+FILTER_JSONL_DESC = 'MongoDB filter (supported subset). exact: {"type": "note"}, supported operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. dot-paths for nested fields: {"meta.source": "web"}. top-level keys are AND'
+FIELDS_JSON_DESC = 'projection: plain string names of fields to return (e.g. ["title", "status"]). NOT for filtering. omit to return all fields'
+FIELDS_JSONL_DESC = 'projection: plain string names of fields to return (e.g. ["type", "content"]). NOT for filtering. omit to return all fields'
+TRAIT_JSON_DESC = "trait filename in traits/, must end in .json (e.g. .tasks.json)"
+TRAIT_JSONL_DESC = "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"
+TRAIT_DESC = "trait path in traits/ (e.g. SOUL.md, sub/topic.md, .data.json)"
+VALUE_DESC = 'the literal value to store, e.g. "blue", 42, [1,2], {"a":1}. passed directly as JSON, not a boolean flag'
+
 class HookResult(TypedDict, total=False):
     system: list[str]
     tools: list[dict]
@@ -142,7 +152,7 @@ def trait_list(
 
 @tool(permission={"arg": "trait"})
 def trait_read(
-    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
+    trait: Annotated[str, TRAIT_DESC],
     offset: Annotated[str, param("the line number to start reading from (1-indexed)", type="number", optional=True)] = "",
     limit: Annotated[str, param(f"the maximum number of lines to read (defaults to {DEFAULT_READ_LIMIT})", type="number", optional=True)] = "",
 ) -> HookResult:
@@ -164,7 +174,7 @@ def trait_read(
 
 @tool(permission={"arg": "trait"})
 def trait_write(
-    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
+    trait: Annotated[str, TRAIT_DESC],
     content: Annotated[str, "full content for the trait"],
 ) -> HookResult:
     """write a trait to the persona. parent directories are created automatically"""
@@ -179,7 +189,7 @@ def trait_write(
 
 @tool(permission={"arg": "trait"})
 def trait_edit(
-    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
+    trait: Annotated[str, TRAIT_DESC],
     oldString: Annotated[str, "the text to replace"],
     newString: Annotated[str, "the text to replace it with (must be different from oldString)"],
     replaceAll: Annotated[str, param("replace all occurrences (default false)", type="boolean", optional=True)] = "false",
@@ -203,8 +213,22 @@ def trait_edit(
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool(permission={"arg": "trait"})
+def trait_append(
+    trait: Annotated[str, TRAIT_DESC],
+    content: Annotated[str, "text to append to the trait"],
+) -> HookResult:
+    """append text to the end of a trait. creates the trait if it doesn't exist"""
+    try:
+        path = trait_path(trait)
+    except ValueError as e:
+        return {"result": result_err(str(e))}
+    append_to_trait(trait, "\n" + content)
+    return {"result": result_ok(), "modified": [trait],
+            "notify": [{"type": "trait_changed", "files": [trait]}]}
+
+@tool(permission={"arg": "trait"})
 def trait_delete(
-    trait: Annotated[str, "trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
+    trait: Annotated[str, TRAIT_DESC],
 ) -> HookResult:
     """delete a trait from the persona. empty parent directories are removed automatically"""
     try:
@@ -220,8 +244,8 @@ def trait_delete(
 
 @tool(permission={"arg": ["old_trait", "new_trait"]})
 def trait_move(
-    old_trait: Annotated[str, "current trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
-    new_trait: Annotated[str, "new trait path in traits/ (e.g. SOUL.md or sub/topic.md)"],
+    old_trait: Annotated[str, "current " + TRAIT_DESC],
+    new_trait: Annotated[str, "new " + TRAIT_DESC],
 ) -> HookResult:
     """rename or move a trait in the persona. destination directories are created and empty source directories are removed automatically"""
     try:
@@ -341,11 +365,17 @@ def _match_condition(value, condition):
         # bare value = exact match
         return value == condition
     for op, operand in condition.items():
-        if op == "$in":
+        if op == "$eq":
+            if value != operand:
+                return False
+        elif op == "$in":
             if value not in operand:
                 return False
-        elif op == "$not":
+        elif op in ("$ne", "$not"):
             if value == operand:
+                return False
+        elif op == "$nin":
+            if value in operand:
                 return False
         elif op == "$lt":
             if value is None or value >= operand:
@@ -360,8 +390,19 @@ def _match_condition(value, condition):
             if value is None or value < operand:
                 return False
         elif op == "$regex":
-            if value is None or not re.search(operand, str(value)):
+            flags = 0
+            opts = condition.get("$options", "")
+            if "i" in opts:
+                flags |= re.IGNORECASE
+            if value is None or not re.search(operand, str(value), flags):
                 return False
+        elif op == "$exists":
+            if operand and value is None:
+                return False
+            if not operand and value is not None:
+                return False
+        elif op == "$options":
+            pass  # handled by $regex
         else:
             return False
     return True
@@ -382,8 +423,25 @@ def _match_filter(entry_id, entry, filter_obj):
                 return False
     return True
 
+def _resolve_dot_path(obj, path):
+    """resolve a dot-separated path into a nested dict (e.g. 'meta.source')."""
+    for part in path.split("."):
+        if isinstance(obj, dict):
+            obj = obj.get(part)
+        else:
+            return None
+    return obj
+
+def _validate_fields(fields):
+    """return fields if valid (None or list of strings), else raise."""
+    if fields is None:
+        return None
+    if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+        raise ValueError(f'fields must be ["name1", "name2"], got: {json.dumps(fields)[:100]}')
+    return fields
+
 def _match_record_filter(record, filter_obj):
-    """evaluate a MongoDB-style filter against a flat record (JSONL)."""
+    """evaluate a MongoDB-style filter against a record (JSONL). supports dot-path keys for nested fields."""
     if not isinstance(filter_obj, dict):
         return True
     for key, condition in filter_obj.items():
@@ -391,7 +449,8 @@ def _match_record_filter(record, filter_obj):
             if not any(_match_record_filter(record, clause) for clause in condition):
                 return False
         else:
-            if not _match_condition(record.get(key), condition):
+            value = _resolve_dot_path(record, key) if "." in key else record.get(key)
+            if not _match_condition(value, condition):
                 return False
     return True
 
@@ -399,15 +458,16 @@ def _match_record_filter(record, filter_obj):
 
 @tool(permission={"arg": "trait"})
 def data_query(
-    trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
-    key: Annotated[str, param("dot-path selector (e.g. mykey, nested.key, arr.0). applied before filter", optional=True)] = "",
-    filter: Annotated[object, param("MongoDB-style filter. exact: {\"status\": \"open\"}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or. top-level keys are AND. \"id\" matches dict keys", type="object", optional=True)] = None,
-    fields: Annotated[object, param("array of field names to include in output (e.g. [\"title\", \"status\"]). omit for all fields", type="array", optional=True)] = None,
+    trait: Annotated[str, TRAIT_JSON_DESC],
+    key: Annotated[str, param("dot-path to a nested value (e.g. mykey, nested.key). omit to query the whole file. not needed for dict-of-dicts like .tasks.json", optional=True)] = "",
+    filter: Annotated[object, param(FILTER_JSON_DESC, type="object", optional=True)] = None,
+    fields: Annotated[object, param(FIELDS_JSON_DESC, type="array[string]", optional=True)] = None,
     limit: Annotated[str, param("max entries to return (default 50, applied after filter)", optional=True)] = "50",
     offset: Annotated[str, param("skip first N entries (default 0)", optional=True)] = "0",
 ) -> HookResult:
     """query structured data from a .json trait. without key, operates on the whole file. on dict-of-dicts, supports MongoDB-style filter on values with id matching on keys"""
     try:
+        fields = _validate_fields(fields)
         data = load_json_trait(trait)
         selected = get_at_key(data, key) if key else data
         # dict-of-dicts: apply filter, pagination, fields projection
@@ -422,7 +482,7 @@ def data_query(
             if start < 0 and end >= 0:
                 end = None
             page = dict(items[start:end])
-            if fields is not None and isinstance(fields, list):
+            if fields is not None and isinstance(fields, list) and fields:
                 page = {k: {f: v[f] for f in fields if f in v} for k, v in page.items()}
             return {"result": json.dumps(page, indent=2, ensure_ascii=False)}
         # non-dict or no filter/pagination: return as-is
@@ -437,9 +497,9 @@ def data_query(
 
 @tool(permission={"arg": "trait"})
 def data_update(
-    trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
+    trait: Annotated[str, TRAIT_JSON_DESC],
     key: Annotated[str, param("dot-path selector (e.g. mykey, nested.key, arr.0)", optional=True)] = "",
-    value: Annotated[object, param("the value to set (any JSON type)", type="any")] = None,
+    value: Annotated[object, param(VALUE_DESC, type="any")] = None,
 ) -> HookResult:
     """set a value in a .json trait at a dot-path key, or overwrite the whole file"""
     try:
@@ -461,7 +521,7 @@ def data_update(
 
 @tool(permission={"arg": "trait"})
 def data_delete(
-    trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
+    trait: Annotated[str, TRAIT_JSON_DESC],
     key: Annotated[str, "dot-path selector to delete (e.g. mykey, nested.key, arr.0)"],
 ) -> HookResult:
     """delete a key or array index from a .json trait"""
@@ -478,9 +538,9 @@ def data_delete(
 
 @tool(permission={"arg": "trait"})
 def data_append(
-    trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
+    trait: Annotated[str, TRAIT_JSON_DESC],
     key: Annotated[str, param("dot-path to array (empty = root array)", optional=True)] = "",
-    value: Annotated[object, param("value to append to the array", type="any")] = None,
+    value: Annotated[object, param(VALUE_DESC, type="any")] = None,
 ) -> HookResult:
     """append a value to an array in a .json trait"""
     try:
@@ -499,11 +559,11 @@ def data_append(
 
 @tool(permission={"arg": "trait"})
 def data_count(
-    trait: Annotated[str, "trait filename in traits/, must end in .json (e.g. .tasks.json)"],
-    field: Annotated[str, param("if set, count unique values for this field instead of field names", optional=True)] = "",
+    trait: Annotated[str, TRAIT_JSON_DESC],
+    field: Annotated[str, param("group by this field and count occurrences of each unique value (e.g. field='status' → {\"open\": 5, \"done\": 3})", optional=True)] = "",
     filter: Annotated[object, param("MongoDB-style filter (same syntax as data_query)", type="object", optional=True)] = None,
 ) -> HookResult:
-    """count entries in a dict-of-dicts .json trait. without field: returns entry count + per-field occurrence counts. with field: returns unique value counts for that field"""
+    """count entries in a dict-of-dicts .json trait. without field: returns total count and field names. with field: groups by that field and returns count per unique value"""
     try:
         data = load_json_trait(trait)
         if not isinstance(data, dict):
@@ -537,11 +597,16 @@ def load_records(name):
     lines = path.read_text().strip().splitlines()
     return [json.loads(line) for line in lines if line.strip()]
 
-def append_record(name, record):
-    """append a single record to a .jsonl trait."""
+def append_to_trait(name, text):
+    """append raw text to a trait file, creating parent dirs as needed."""
     path = trait_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        f.write(text)
+
+def append_record(name, record):
+    """append a single JSON record to a .jsonl trait."""
+    append_to_trait(name, json.dumps(record, ensure_ascii=False) + "\n")
 
 def _stable_sort_record(record):
     """sort record keys alphabetically, id first."""
@@ -552,17 +617,18 @@ def _stable_sort_record(record):
 
 @tool(permission={"arg": "trait"})
 def record_append(
-    trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
-    fields: Annotated[object, param("record fields as a JSON object", type="object")] = None,
+    trait: Annotated[str, TRAIT_JSONL_DESC],
+    fields: Annotated[object, param('object of field names to values, e.g. {"type": "observation", "content": "saw a bird", "meta": {"source": "web"}}. values can be strings, numbers, booleans, arrays, or nested objects', type="object")] = None,
 ) -> HookResult:
-    """append a timestamped record to a .jsonl trait"""
+    """append a timestamped record to a .jsonl trait. timestamp is added automatically"""
     try:
         if not trait.endswith(".jsonl"):
             return {"result": result_err("trait must have .jsonl extension")}
         trait_path(trait)  # validate path
+        if not isinstance(fields, dict) or not any(v for v in fields.values()):
+            return {"result": result_err("fields must be a JSON object with at least one non-empty value")}
         record = {"timestamp": format_iso(datetime.now(timezone.utc))}
-        if isinstance(fields, dict):
-            record.update(fields)
+        record.update(fields)
         append_record(trait, record)
         return {"result": result_ok(), "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
@@ -571,14 +637,15 @@ def record_append(
 
 @tool(permission={"arg": "trait"})
 def record_query(
-    trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
-    filter: Annotated[object, param("MongoDB-style filter. exact: {\"type\": \"note\"}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or. top-level keys are AND", type="object", optional=True)] = None,
-    fields: Annotated[object, param("array of field names to include in output (e.g. [\"type\", \"content\"]). omit for all fields", type="array", optional=True)] = None,
+    trait: Annotated[str, TRAIT_JSONL_DESC],
+    filter: Annotated[object, param(FILTER_JSONL_DESC, type="object", optional=True)] = None,
+    fields: Annotated[object, param(FIELDS_JSONL_DESC, type="array[string]", optional=True)] = None,
     limit: Annotated[str, param("max records to return (default 50)", optional=True)] = "50",
     offset: Annotated[str, param("skip first N records, negative counts from end (default 0, oldest first)", optional=True)] = "0",
 ) -> HookResult:
     """query records from a .jsonl trait with MongoDB-style filtering and pagination"""
     try:
+        fields = _validate_fields(fields)
         records = load_records(trait)
         filtered = [r for r in records if _match_record_filter(r, filter)]
         start = int(offset)
@@ -586,7 +653,7 @@ def record_query(
         if start < 0 and end >= 0:
             end = None
         page = filtered[start:end]
-        if fields is not None and isinstance(fields, list):
+        if fields is not None and isinstance(fields, list) and fields:
             page = [{f: r[f] for f in fields if f in r} for r in page]
         else:
             page = [_stable_sort_record(r) for r in page]
@@ -599,20 +666,20 @@ def record_query(
 
 @tool(permission={"arg": "trait"})
 def record_count(
-    trait: Annotated[str, "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"],
-    field: Annotated[str, param("if set, count unique values for this field instead of field names", optional=True)] = "",
+    trait: Annotated[str, TRAIT_JSONL_DESC],
+    field: Annotated[str, param("group by this field (supports dot-paths like meta.source) and count occurrences of each unique value (e.g. field='status' → {\"open\": 5, \"done\": 3})", optional=True)] = "",
     filter: Annotated[object, param("MongoDB-style filter (same syntax as record_query)", type="object", optional=True)] = None,
 ) -> HookResult:
-    """count records in a .jsonl trait. without field: returns record count + per-field occurrence counts. with field: returns unique value counts for that field"""
+    """count records in a .jsonl trait. without field: returns total count and field names. with field: groups by that field and returns count per unique value"""
     try:
         records = load_records(trait)
         filtered = [r for r in records if _match_record_filter(r, filter)]
         if field:
             values: dict[str, int] = {}
             for r in filtered:
-                v = r.get(field)
+                v = _resolve_dot_path(r, field) if "." in field else r.get(field)
                 if v is not None:
-                    key = str(v)
+                    key = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True)
                     values[key] = values.get(key, 0) + 1
             return {"result": json.dumps({"count": len(filtered), "field": field, "values": values})}
         field_counts: dict[str, int] = {}
@@ -655,7 +722,10 @@ def parse_iso_duration(value):
     return timedelta(days=total_days, hours=hours, minutes=minutes, seconds=seconds)
 
 def load_tasks():
-    return load_json_trait(TASKS_TRAIT)
+    try:
+        return load_json_trait(TASKS_TRAIT)
+    except FileNotFoundError:
+        return {}
 
 def save_tasks(data):
     save_json_trait(TASKS_TRAIT, data)

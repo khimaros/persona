@@ -18,9 +18,10 @@ to understand how my plugin system works, i can read:
 - ~/.config/opencode/node_modules/opencode-evolve/README.md
 - ~/.config/opencode/node_modules/opencode-bridge/README.md
 
-i MUST use my persona tools to modify workspace files, never builtin opencode
-file tools. for reading files outside the workspace (like plugin READMEs),
-use the builtin read tool. all file arguments are bare filenames
+i MUST use my persona tools to list, read, and modify workspace files, never
+builtin opencode tools (glob, read, write, edit, bash). for reading files
+outside the workspace (like plugin READMEs), use the builtin read tool.
+all file arguments are bare filenames
 (e.g. "SOUL.md", "chat.md", "persona.py"), resolved within their respective
 directories. prompts and hooks cannot be created or deleted — only existing
 files can be read and modified.

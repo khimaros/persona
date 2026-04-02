@@ -78,7 +78,7 @@ try:
     check("discover has no typo keys", not has_key(r, "tool"))
     names = [t["name"] for t in r["tools"]]
     for expected in ("trait_list", "trait_read", "trait_write", "trait_edit",
-                     "trait_delete", "trait_move",
+                     "trait_append", "trait_delete", "trait_move",
                      "data_query", "data_update", "data_delete", "data_append", "data_count",
                      "record_append", "record_query", "record_count",
                      "task_create", "task_update", "task_comment"):
@@ -88,7 +88,7 @@ try:
                     "task_list", "task_read", "task_delete",
                     "journal_append", "journal_list", "journal_count"):
         check(f"discover excludes {removed}", removed not in names, f"got: {names}")
-    check("discover returns exactly 17 tools", len(r["tools"]) == 17, f"got: {len(r['tools'])}")
+    check("discover returns exactly 18 tools", len(r["tools"]) == 18, f"got: {len(r['tools'])}")
     check("discover logs tool names", any("tools:" in l for l in logs))
 
     # --- discover tool parameter schemas ---
@@ -101,14 +101,14 @@ try:
 
     # data_query fields param must be array type
     dq_fields = tools_by_name["data_query"]["parameters"].get("fields", {})
-    check("data_query fields is array type",
-          isinstance(dq_fields, dict) and dq_fields.get("type") == "array",
+    check("data_query fields is array[string] type",
+          isinstance(dq_fields, dict) and dq_fields.get("type") == "array[string]",
           f"got: {dq_fields}")
 
-    # record_query fields param must be array type
+    # record_query fields param must be array[string] type
     rq_fields = tools_by_name["record_query"]["parameters"].get("fields", {})
-    check("record_query fields is array type",
-          isinstance(rq_fields, dict) and rq_fields.get("type") == "array",
+    check("record_query fields is array[string] type",
+          isinstance(rq_fields, dict) and rq_fields.get("type") == "array[string]",
           f"got: {rq_fields}")
 
     # --- mutate_request ---
@@ -339,6 +339,24 @@ try:
     r, _, _ = call_tool(hook, "trait_edit", {"trait": "DUP.md", "oldString": "a", "newString": "b"})
     parsed = result_json(r)
     check("trait_edit multiple matches returns error", "error" in parsed, f"got: {parsed}")
+
+    # --- trait_append ---
+
+    open(os.path.join(tmp, "traits", "APPEND.md"), "w").write("line one")
+
+    r, logs, _ = call_tool(hook, "trait_append", {"trait": "APPEND.md", "content": "line two"})
+    check("trait_append returns result key", has_key(r, "result"))
+    parsed = result_json(r)
+    check("trait_append returns success json", parsed.get("success") is True, f"got: {parsed}")
+    check("trait_append reports modified", r.get("modified") == ["APPEND.md"])
+    content = open(os.path.join(tmp, "traits", "APPEND.md")).read()
+    check("trait_append appended content", content == "line one\nline two")
+
+    r, _, _ = call_tool(hook, "trait_append", {"trait": "NEWFILE.md", "content": "created by append"})
+    parsed = result_json(r)
+    check("trait_append creates new file", parsed.get("success") is True, f"got: {parsed}")
+    content = open(os.path.join(tmp, "traits", "NEWFILE.md")).read()
+    check("trait_append new file content", content == "\ncreated by append")
 
     # --- trait_delete ---
 
@@ -716,6 +734,14 @@ try:
     check("data_query filter $gt + $lte range", set(parsed.keys()) == {"id2"},
           f"got: {list(parsed.keys())}")
 
+    # --- data_query MongoDB-style filter: $eq ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": {"status": {"$eq": "open"}}})
+    parsed = result_json(r)
+    check("data_query filter $eq", set(parsed.keys()) == {"id1", "id3"},
+          f"got: {list(parsed.keys())}")
+
     # --- data_query MongoDB-style filter: $regex ---
 
     r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
@@ -724,12 +750,36 @@ try:
     check("data_query filter $regex", set(parsed.keys()) == {"id1"},
           f"got: {list(parsed.keys())}")
 
+    # --- data_query MongoDB-style filter: $regex with $options ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": {"title": {"$regex": "^A", "$options": "i"}}})
+    parsed = result_json(r)
+    check("data_query filter $regex + $options i", set(parsed.keys()) == {"id1"},
+          f"got: {list(parsed.keys())}")
+
     # --- data_query MongoDB-style filter: $not ---
 
     r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
                                               "filter": {"status": {"$not": "done"}}})
     parsed = result_json(r)
     check("data_query filter $not", set(parsed.keys()) == {"id1", "id3"},
+          f"got: {list(parsed.keys())}")
+
+    # --- data_query MongoDB-style filter: $ne (alias for $not) ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": {"status": {"$ne": "done"}}})
+    parsed = result_json(r)
+    check("data_query filter $ne", set(parsed.keys()) == {"id1", "id3"},
+          f"got: {list(parsed.keys())}")
+
+    # --- data_query MongoDB-style filter: $nin ---
+
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+                                              "filter": {"status": {"$nin": ["done", "error"]}}})
+    parsed = result_json(r)
+    check("data_query filter $nin", set(parsed.keys()) == {"id1", "id3"},
           f"got: {list(parsed.keys())}")
 
     # --- data_query MongoDB-style filter: $or (top-level) ---
@@ -991,6 +1041,13 @@ try:
     check("record_query filter exact match", "1/" in r["result"])
     check("record_query filter content", "hello" in r["result"])
 
+    # --- record_query MongoDB-style filter: $eq ---
+
+    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
+                                                "filter": {"type": {"$eq": "note"}}})
+    check("record_query filter $eq", "1/" in r["result"])
+    check("record_query filter $eq content", "hello" in r["result"])
+
     # --- record_query MongoDB-style filter: $in ---
 
     r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
@@ -1009,6 +1066,19 @@ try:
                                                 "filter": {"type": {"$not": "obs"}}})
     check("record_query filter $not", "1/" in r["result"])
     check("record_query filter $not content", "hello" in r["result"])
+
+    # --- record_query MongoDB-style filter: $ne (alias for $not) ---
+
+    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
+                                                "filter": {"type": {"$ne": "obs"}}})
+    check("record_query filter $ne", "1/" in r["result"])
+
+    # --- record_query MongoDB-style filter: $nin ---
+
+    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
+                                                "filter": {"type": {"$nin": ["obs", "error"]}}})
+    check("record_query filter $nin", "1/" in r["result"])
+    check("record_query filter $nin content", "hello" in r["result"])
 
     # --- record_query MongoDB-style filter: $lt/$gt (date range) ---
 
@@ -1114,6 +1184,56 @@ try:
     r, _, _ = call_tool(hook, "record_append", {"trait": "noext"})
     parsed = result_json(r)
     check("record_append rejects non-.jsonl", "error" in parsed)
+
+    # --- nested object support ---
+
+    nested_jsonl = ".nested_test.jsonl"
+    r, _, _ = call_tool(hook, "record_append", {"trait": nested_jsonl,
+        "fields": {"type": "event", "meta": {"source": "web", "tags": ["a", "b"]}, "count": 42}})
+    parsed = result_json(r)
+    check("record_append nested object succeeds", parsed.get("success") is True, f"got: {parsed}")
+
+    r, _, _ = call_tool(hook, "record_append", {"trait": nested_jsonl,
+        "fields": {"type": "event", "meta": {"source": "api", "tags": ["c"]}, "count": 7}})
+    parsed = result_json(r)
+    check("record_append nested object second", parsed.get("success") is True)
+
+    # query all nested records
+    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl})
+    check("record_query nested shows all", "2/" in r["result"])
+
+    # exact filter on top-level string still works
+    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl,
+        "filter": {"type": "event"}})
+    check("record_query nested filter top-level", "2/" in r["result"])
+
+    # dot-path filter on nested field
+    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl,
+        "filter": {"meta.source": "web"}})
+    check("record_query dot-path filter", "1/" in r["result"])
+    check("record_query dot-path filter content", "web" in r["result"])
+
+    # dot-path filter with operator
+    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl,
+        "filter": {"meta.source": {"$in": ["web", "cli"]}}})
+    check("record_query dot-path $in", "1/" in r["result"])
+
+    # record_count with nested field grouping
+    r, _, _ = call_tool(hook, "record_count", {"trait": nested_jsonl, "field": "meta.source"})
+    parsed = json.loads(r["result"])
+    check("record_count dot-path field", parsed.get("count") == 2, f"got: {parsed}")
+    check("record_count dot-path values", parsed["values"].get("web") == 1)
+    check("record_count dot-path values api", parsed["values"].get("api") == 1)
+
+    # record_count grouping on non-string nested value uses json serialization
+    r, _, _ = call_tool(hook, "record_count", {"trait": nested_jsonl, "field": "meta"})
+    parsed = json.loads(r["result"])
+    check("record_count nested object grouping", parsed.get("count") == 2)
+    # values should be json-serialized keys (double quotes), not python str(dict) (single quotes)
+    for k in parsed.get("values", {}):
+        check("record_count nested grouping uses json not str", "'" not in k, f"got key: {k}")
+
+    os.remove(os.path.join(tmp, "traits", nested_jsonl))
 
     os.remove(os.path.join(tmp, "traits", ".test.jsonl"))
 
@@ -1409,7 +1529,7 @@ try:
     r, _, _ = call_hook(hook, "discover")
     names = sorted(t["name"] for t in r["tools"])
     expected_names = sorted([
-        "trait_list", "trait_read", "trait_write", "trait_edit", "trait_delete", "trait_move",
+        "trait_list", "trait_read", "trait_write", "trait_edit", "trait_append", "trait_delete", "trait_move",
         "data_query", "data_update", "data_delete", "data_append", "data_count",
         "record_append", "record_query", "record_count",
         "task_create", "task_update", "task_comment",
@@ -1445,7 +1565,7 @@ try:
     check("format_iso converts to UTC offset", est_fmt == "2026-04-01T17:00:00.000+00:00", f"got: {est_fmt}")
 
     # record_append timestamps use canonical format
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".dt_test.jsonl", "fields": {"v": 1}})
+    r, _, _ = call_tool(hook, "record_append", {"trait": ".dt_test.jsonl", "fields": {"v": "1"}})
     dt_line = open(os.path.join(tmp, "traits", ".dt_test.jsonl")).read().strip()
     dt_entry = json.loads(dt_line)
     check("record timestamp uses offset format", bool(DT_RE.match(dt_entry["timestamp"])),

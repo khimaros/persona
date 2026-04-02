@@ -33,6 +33,7 @@ permission:
         "*": deny
         "~/workspace/**": allow
         "~/.config/opencode/**": allow
+        "~/.local/share/opencode/tool-output/**": allow
     #"edit":
     #    "*": deny
     #    "~/workspace/tests/*": ask
@@ -52,6 +53,7 @@ permission:
         "~/.config/opencode/node_modules/opencode-bridge/README.md": allow
         "~/.config/opencode/node_modules/opencode-evolve/README.md": allow
         "~/.config/opencode/node_modules/@opencode-ai/**": allow
+        "~/.local/share/opencode/tool-output/**": allow
     "bash":
         "*": deny
         "~/workspace/tests/*": allow

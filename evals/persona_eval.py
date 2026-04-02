@@ -5,7 +5,7 @@ requires a running opencode server with the persona agent configured.
 
 usage:
     make eval
-    OPENCODE_URL=http://10.0.0.1:4096 pytest server/tests/persona_eval.py -v
+    OPENCODE_URL=http://host:4096 pytest evals/persona_eval.py -v
 
 environment:
     OPENCODE_URL      server base URL (required, set by Makefile from container ADDRESS)
@@ -14,7 +14,7 @@ environment:
     OPENCODE_MODEL    model ID override, e.g. anthropic/claude-sonnet-4-20250514
 """
 
-import json, os, re, time
+import json, os, re, time, warnings
 import urllib.request, urllib.error
 import pytest
 
@@ -24,24 +24,28 @@ AGENT = os.environ.get("OPENCODE_AGENT", "per")
 MODEL = os.environ.get("OPENCODE_MODEL", "")
 
 POLL_INTERVAL = 2
-POLL_TIMEOUT = 300
+POLL_TIMEOUT = 86400
 
 # test data constants
 TEST_TRAIT = "eval_test_trait.md"
 TEST_TRAIT_CONTENT = "this is an eval test trait for verification"
-TEST_TASK_SUMMARY = "eval test task: verify persona tools"
+TEST_TASK_SUMMARY = "review eval results"
 TEST_TASK_DUE = "2099-12-31T00:00:00.000+00:00"
+TEST_CLOSED_TASK_SUMMARY = "update documentation"
+TEST_CLOSED_TASK_DUE = "2099-12-31T00:00:00.000+00:00"
+TEST_RECURRING_SUMMARY = "write a short poem to the poems.md trait"
+TEST_RECURRING_DUE = "2025-01-01T00:00:00.000+00:00"
+TEST_RECURRING_INTERVAL = "PT1H"
+TEST_RECURRING_DUE_BUMPED = "2025-01-01T01:00:00.000+00:00"
 TEST_JOURNAL_CONTENT = "eval test observation: the sky is particularly blue today"
+TEST_TRAIT_RENAME = "eval_test_trait_renamed.md"
+TEST_DATA_TRAIT = ".eval_data.json"
 
 # --- HTTP helpers ---
 
 def api(method, path, body=None, expect_empty=False):
-    """make an HTTP request to the opencode API."""
     url = f"{BASE_URL}{path}"
-    headers = {
-        "Content-Type": "application/json",
-        "x-opencode-directory": DIRECTORY,
-    }
+    headers = {"Content-Type": "application/json", "x-opencode-directory": DIRECTORY}
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req) as resp:
@@ -66,41 +70,40 @@ def wait_idle(session_id):
 
 # --- response parsing ---
 
-def extract_tool_calls(response):
-    calls = []
-    for part in response.get("parts", []):
-        if part.get("type") == "tool":
-            state = part.get("state", {})
-            calls.append({
-                "tool": part["tool"],
-                "input": state.get("input", {}),
-                "output": state.get("output", ""),
-                "status": state.get("status", "unknown"),
-            })
-    return calls
+class Response:
+    """parsed LLM response with tool calls, text, and reasoning."""
+    def __init__(self, raw):
+        parts = raw.get("parts", [])
+        self.calls = []
+        for p in parts:
+            if p.get("type") == "tool":
+                s = p.get("state", {})
+                self.calls.append({
+                    "tool": p["tool"],
+                    "input": s.get("input", {}),
+                    "output": s.get("output", ""),
+                    "status": s.get("status", "unknown"),
+                })
+        self.text = "\n".join(
+            p.get("text", "") for p in parts if p.get("type") == "text")
+        self.reasoning = "\n".join(
+            p.get("text", "") for p in parts if p.get("type") == "reasoning")
 
-def extract_text(response):
-    texts = []
-    for part in response.get("parts", []):
-        if part.get("type") == "text":
-            texts.append(part.get("text", ""))
-    return "\n".join(texts)
+    @property
+    def diag(self):
+        return format_diagnostics(self.calls, self.text, self.reasoning)
 
-def parse_tool_output(output):
-    """parse JSON from tool output string, returning {} on failure."""
-    if not output:
-        return {}
-    try:
-        return json.loads(output)
-    except (json.JSONDecodeError, TypeError):
-        return {}
+    def tool_output(self, index):
+        """parse JSON output of tool call at index."""
+        raw = self.calls[index]["output"] if index < len(self.calls) else ""
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
-def extract_reasoning(response):
-    texts = []
-    for part in response.get("parts", []):
-        if part.get("type") == "reasoning":
-            texts.append(part.get("text", ""))
-    return "\n".join(texts)
+# --- assertion helpers ---
 
 def match_args(expected, actual):
     """check that expected args are a subset of actual args."""
@@ -117,11 +120,130 @@ def match_args(expected, actual):
             return False, f"{key}: expected {val!r}, got {actual[key]!r}"
     return True, ""
 
+def format_call(c):
+    """format a single tool call for diagnostics."""
+    s = f"{c['tool']} [{c['status']}]({json.dumps(c['input'], ensure_ascii=False)[:200]})"
+    if c["status"] == "error":
+        s += f"\n      error: {c['output'][:200]}"
+    return s
+
+def format_diagnostics(calls, text, reasoning):
+    lines = [f"actual calls ({len(calls)}):"]
+    for i, c in enumerate(calls):
+        lines.append(f"  [{i}] {format_call(c)}")
+    if text:
+        lines.append(f"text: {text[:400]}")
+    if reasoning:
+        lines.append(f"reasoning: {reasoning[:500]}")
+    return "\n".join(lines)
+
+def parse_tool_output(output):
+    """parse JSON from a raw tool output string."""
+    if not output:
+        return {}
+    try:
+        return json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+def _check_call(actual, exp, prefix, diag):
+    """validate a single actual call against an expected spec."""
+    assert actual["tool"] == exp["tool"], (
+        f"{prefix}: expected {exp['tool']}, got {actual['tool']}\n{diag}"
+    )
+    expected_status = exp.get("status", "completed")
+    assert actual["status"] == expected_status, (
+        f"{prefix} {actual['tool']}: expected status={expected_status}, "
+        f"got status={actual['status']}\n{diag}"
+    )
+    if "args" in exp:
+        ok, msg = match_args(exp["args"], actual["input"])
+        assert ok, (
+            f"{prefix} {actual['tool']} args: {msg}\n"
+            f"  expected: {exp['args']}\n"
+            f"  actual:   {actual['input']}\n{diag}"
+        )
+    if "output" in exp:
+        parsed = parse_tool_output(actual["output"])
+        ok, msg = match_args(exp["output"], parsed)
+        assert ok, (
+            f"{prefix} {actual['tool']} output: {msg}\n"
+            f"  expected: {exp['output']}\n"
+            f"  actual:   {parsed}\n{diag}"
+        )
+
+def assert_calls(r, expect, also=None):
+    """assert tool calls match expected sequence exactly.
+
+    r: Response object
+    expect: list of dicts, each with:
+        tool: exact tool name
+        args: dict of arg key/values to subset-match (optional)
+        status: expected status, default "completed" (optional)
+        output: dict of output key/values to subset-match (optional)
+    also: list of permitted extra call specs (same format as expect).
+        extra calls matching any spec in also may appear anywhere
+        without causing a count/order mismatch. required calls in
+        expect are matched first, so a tool can appear in both expect
+        and also (required once, extras permitted).
+    """
+    also = also or []
+    also_names = {a["tool"] for a in also}
+    # greedily match actual calls against expect in order
+    required, extras = [], []
+    ei = 0
+    for c in r.calls:
+        if ei < len(expect) and c["tool"] == expect[ei]["tool"]:
+            required.append(c)
+            ei += 1
+        elif c["tool"] in also_names:
+            extras.append(c)
+        else:
+            required.append(c)
+    assert len(required) == len(expect), (
+        f"expected {len(expect)} required call(s), got {len(required)}\n"
+        f"expected: {[e['tool'] for e in expect]}\n"
+        f"also permitted: {[a['tool'] for a in also]}\n"
+        f"extras: {[c['tool'] for c in extras]}\n{r.diag}"
+    )
+    for i, (actual, exp) in enumerate(zip(required, expect)):
+        _check_call(actual, exp, f"call [{i}]", r.diag)
+    # validate each extra call against its matching also spec
+    for c in extras:
+        spec = next(a for a in also if a["tool"] == c["tool"])
+        _check_call(c, spec, f"also[{c['tool']}]", r.diag)
+    if extras:
+        names = [c["tool"] for c in extras]
+        warnings.warn(f"optional calls used: {names}", stacklevel=2)
+
+def assert_bash_sequence(r, patterns):
+    """assert bash tool calls match expected command patterns in order.
+
+    patterns: list of regex patterns to match against command strings.
+    only bash calls are considered; non-bash calls are ignored.
+    """
+    bash_calls = [c for c in r.calls if c["tool"] == "bash"]
+    commands = [c["input"].get("command", "") for c in bash_calls]
+    assert len(bash_calls) >= len(patterns), (
+        f"expected at least {len(patterns)} bash call(s), got {len(bash_calls)}\n"
+        f"commands: {commands}\n{r.diag}"
+    )
+    for i, pattern in enumerate(patterns):
+        assert re.search(pattern, commands[i]), (
+            f"bash call [{i}]: expected command matching /{pattern}/\n"
+            f"actual: {commands[i]!r}\n{r.diag}"
+        )
+
+def assert_text(r, pattern):
+    """assert response text matches a regex pattern."""
+    assert re.search(pattern, r.text, re.IGNORECASE), (
+        f"expected text matching /{pattern}/i\n{r.diag}"
+    )
+
 # --- session fixture ---
 
 @pytest.fixture(scope="module")
 def session_id():
-    """create a session for the entire eval module."""
     if not BASE_URL:
         pytest.skip("OPENCODE_URL not set")
     try:
@@ -132,7 +254,6 @@ def session_id():
     return result["id"]
 
 class SessionState:
-    """track message count between prompts within a session."""
     msg_count = 0
 
 @pytest.fixture(scope="module")
@@ -140,246 +261,330 @@ def state():
     return SessionState()
 
 def send_prompt(session_id, state, text):
-    """send a prompt, wait for completion, return parsed response."""
-    body = {
-        "agent": AGENT,
-        "parts": [{"type": "text", "text": text}],
-    }
+    """send a prompt, wait for completion, return Response."""
+    body = {"agent": AGENT, "parts": [{"type": "text", "text": text}]}
     if MODEL:
         provider, model = MODEL.split("/", 1)
         body["model"] = {"providerID": provider, "modelID": model}
-    # count messages before sending
     msgs = api("GET", f"/session/{session_id}/message")
     state.msg_count = len(msgs)
     api("POST", f"/session/{session_id}/prompt_async", body, expect_empty=True)
     assert wait_idle(session_id), "timed out waiting for LLM response"
-    # fetch new messages
     msgs = api("GET", f"/session/{session_id}/message")
     new_msgs = msgs[state.msg_count:]
     parts = []
     for msg in new_msgs:
         if msg.get("info", {}).get("role") == "assistant":
             parts.extend(msg.get("parts", []))
-    return {"parts": parts}
+    return Response({"parts": parts})
 
-def format_diagnostics(calls, text, reasoning):
-    """format response diagnostics for assertion messages."""
-    lines = []
-    tool_names = [c["tool"] for c in calls]
-    lines.append(f"tools called: {tool_names}")
-    for c in calls:
-        lines.append(f"  {c['tool']} [{c['status']}]: {json.dumps(c['input'], ensure_ascii=False)[:200]}")
-        if c["status"] == "error":
-            lines.append(f"    error: {c['output'][:200]}")
-    if text:
-        lines.append(f"text: {text[:300]}")
-    if reasoning:
-        lines.append(f"reasoning: {reasoning[:500]}")
-    return "\n".join(lines)
+# === eval tests ===
 
-# --- core expansion (no tools, answer from system prompt) ---
+# --- core expansion (answer from system prompt, no tools) ---
 
 class TestCoreExpansion:
     def test_agents_from_system_prompt(self, session_id, state):
-        """LLM answers about plugins from inlined AGENTS trait without calling tools."""
+        """LLM answers about plugins from inlined AGENTS trait without tool calls."""
         r = send_prompt(session_id, state, "what plugins are you built on? answer briefly, just name them.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert len(tool_names) == 0, f"expected no tool calls\n{diag}"
-        assert "persona_trait_read" not in tool_names, f"should not read traits\n{diag}"
-        assert re.search(r"(?i)evolve|bridge", text), f"expected mention of evolve or bridge\n{diag}"
+        assert_calls(r, [], also=[
+            {"tool": "persona_trait_read", "args": {"trait": "AGENTS.md"}},
+        ])
+        assert_text(r, r"(?i)evolve|bridge")
 
-# --- trait tools: create, list, read, edit, delete ---
+# --- trait tools: create, list, read, edit, read, delete ---
 
 class TestTraitLifecycle:
     def test_01_create(self, session_id, state):
-        r = send_prompt(session_id, state, f"create a new trait called {TEST_TRAIT} with this exact content: {TEST_TRAIT_CONTENT}")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_trait_write" in tool_names, f"expected trait_write call\n{diag}"
-        tw = [c for c in calls if c["tool"] == "persona_trait_write"][0]
-        assert tw["input"].get("trait") == TEST_TRAIT, f"expected trait={TEST_TRAIT}\n{diag}"
-        assert tw["status"] == "completed", f"expected completed status\n{diag}"
+        r = send_prompt(session_id, state,
+            f"create a new trait called {TEST_TRAIT} with this exact content: {TEST_TRAIT_CONTENT}")
+        assert_calls(r, [
+            {"tool": "persona_trait_write", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+        ])
 
     def test_02_list_includes_created(self, session_id, state):
-        r = send_prompt(session_id, state, "what traits do i have? list them all.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_trait_list" in tool_names, f"expected trait_list call\n{diag}"
-        assert TEST_TRAIT in text, f"expected {TEST_TRAIT} in response\n{diag}"
+        r = send_prompt(session_id, state, "what traits do i have? list every filename.")
+        assert_calls(r, [
+            {"tool": "persona_trait_list"},
+        ])
+        assert_text(r, re.escape(TEST_TRAIT))
 
     def test_03_read_returns_content(self, session_id, state):
-        r = send_prompt(session_id, state, f"read the {TEST_TRAIT} trait and quote its full content back to me verbatim.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_trait_read" in tool_names, f"expected trait_read call\n{diag}"
-        tr = [c for c in calls if c["tool"] == "persona_trait_read"][0]
-        assert tr["input"].get("trait") == TEST_TRAIT, f"expected trait={TEST_TRAIT}\n{diag}"
-        assert "eval test trait for verification" in text, f"expected content in response\n{diag}"
+        r = send_prompt(session_id, state,
+            f"read the {TEST_TRAIT} trait and quote its full content back to me verbatim.")
+        assert_calls(r, [
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
+        ])
+        assert_text(r, "eval test trait for verification")
 
-    def test_04_edit(self, session_id, state):
-        r = send_prompt(session_id, state, f"edit {TEST_TRAIT} and append a new line: 'updated by eval harness'")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_trait_edit" in tool_names, f"expected trait_edit call\n{diag}"
-        te = [c for c in calls if c["tool"] == "persona_trait_edit"][0]
-        assert te["input"].get("trait") == TEST_TRAIT, f"expected trait={TEST_TRAIT}\n{diag}"
-        assert te["status"] == "completed", f"expected completed status\n{diag}"
+    def test_04_append(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"append a new line to {TEST_TRAIT}: 'updated by eval harness'")
+        assert_calls(r, [
+            {"tool": "persona_trait_append", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
+        ])
 
-    def test_05_read_after_edit(self, session_id, state):
-        r = send_prompt(session_id, state, f"read {TEST_TRAIT} again and quote its full content verbatim.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_trait_read" in tool_names, f"expected trait_read call\n{diag}"
-        assert "updated by eval harness" in text, f"expected edited content in response\n{diag}"
+    def test_05_read_after_append(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"read {TEST_TRAIT} again and quote its full content verbatim.")
+        assert_calls(r, [
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
+        ])
+        assert_text(r, "updated by eval harness")
 
     def test_06_delete(self, session_id, state):
         r = send_prompt(session_id, state, f"delete the {TEST_TRAIT} trait")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_trait_delete" in tool_names, f"expected trait_delete call\n{diag}"
-        td = [c for c in calls if c["tool"] == "persona_trait_delete"][0]
-        assert td["input"].get("trait") == TEST_TRAIT, f"expected trait={TEST_TRAIT}\n{diag}"
-        assert td["status"] == "completed", f"expected completed status\n{diag}"
+        assert_calls(r, [
+            {"tool": "persona_trait_delete", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+        ])
 
-# --- task tools: create, query, count, delete ---
+# --- task tools: create, query, filter, count, delete ---
 
 class TestTaskLifecycle:
     def test_01_create(self, session_id, state):
         r = send_prompt(session_id, state,
             f"create a task: {TEST_TASK_SUMMARY}. due {TEST_TASK_DUE}. tell me the task id from the response.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_task_create" in tool_names, f"expected task_create call\n{diag}"
-        tc = [c for c in calls if c["tool"] == "persona_task_create"][0]
-        assert tc["status"] == "completed", f"expected completed status\n{diag}"
-        # parse the tool output and verify the LLM relays the actual id
-        output = parse_tool_output(tc["output"])
-        assert output.get("success") is True, f"expected success in tool output\n{diag}"
-        task_id = output.get("id", "")
-        assert task_id, f"expected id in tool output\n{diag}"
-        assert task_id in text, f"expected LLM to relay task id {task_id}\n{diag}"
+        assert_calls(r, [
+            {"tool": "persona_task_create", "args": {"title": TEST_TASK_SUMMARY, "due": TEST_TASK_DUE}, "output": {"success": True}},
+        ])
+        task_id = r.tool_output(0).get("id", "")
+        assert task_id, f"expected id in tool output\n{r.diag}"
+        assert task_id in r.text, f"expected LLM to relay task id {task_id}\n{r.diag}"
 
-    def test_02_query_finds_created(self, session_id, state):
-        r = send_prompt(session_id, state, "list my tasks. quote the summary of each one.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_data_query" in tool_names, f"expected data_query call\n{diag}"
-        dq = [c for c in calls if c["tool"] == "persona_data_query"][0]
-        assert dq["input"].get("trait") == ".tasks.json", f"expected trait=.tasks.json\n{diag}"
-        assert "persona_task_list" not in tool_names, f"should not use removed task_list\n{diag}"
-        assert "verify persona tools" in text, f"expected task summary in response\n{diag}"
-
-    def test_03_filter_open(self, session_id, state):
-        r = send_prompt(session_id, state, "show me only open tasks. quote their summaries.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_data_query" in tool_names, f"expected data_query call\n{diag}"
-        assert "verify persona tools" in text, f"expected task summary in response\n{diag}"
-
-    def test_04_filter_by_due_date(self, session_id, state):
-        r = send_prompt(session_id, state, "what tasks are due before 2100-01-01T00:00:00.000+00:00? quote each summary.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_data_query" in tool_names, f"expected data_query call\n{diag}"
-        assert "verify persona tools" in text, f"expected task summary in response\n{diag}"
-
-    def test_05_count_by_status(self, session_id, state):
-        r = send_prompt(session_id, state, "how many tasks do i have in each status? give me the counts.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_data_count" in tool_names, f"expected data_count call\n{diag}"
-        dc = [c for c in calls if c["tool"] == "persona_data_count"][0]
-        assert dc["input"].get("trait") == ".tasks.json", f"expected trait=.tasks.json\n{diag}"
-        assert dc["input"].get("field") == "status", f"expected field=status\n{diag}"
-
-    def test_06_delete(self, session_id, state):
+    def test_02_create_closed(self, session_id, state):
+        """create a second task and immediately close it for filter contrast."""
         r = send_prompt(session_id, state,
-            "find the task with summary containing 'verify persona tools' and delete it from .tasks.json using data_delete")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_data_delete" in tool_names, f"expected data_delete call\n{diag}"
-        dd = [c for c in calls if c["tool"] == "persona_data_delete"][0]
-        assert dd["input"].get("trait") == ".tasks.json", f"expected trait=.tasks.json\n{diag}"
-        assert dd["status"] == "completed", f"expected completed status\n{diag}"
-        assert "persona_task_delete" not in tool_names, f"should not use removed task_delete\n{diag}"
+            f"create a task: {TEST_CLOSED_TASK_SUMMARY}. due {TEST_CLOSED_TASK_DUE}. then mark it as closed.")
+        assert_calls(r, [
+            {"tool": "persona_task_create", "args": {"title": TEST_CLOSED_TASK_SUMMARY, "due": TEST_CLOSED_TASK_DUE}, "output": {"success": True}},
+            {"tool": "persona_task_update", "args": {"status": "closed"}, "output": {"success": True}},
+        ])
+
+    def test_03_filter_by_due_date(self, session_id, state):
+        r = send_prompt(session_id, state,
+            "what tasks are due before 2100-01-01? quote each title.")
+        assert_calls(r, [
+            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+        ])
+        assert_text(r, re.escape(TEST_TASK_SUMMARY))
+
+    def test_04_count_by_status(self, session_id, state):
+        r = send_prompt(session_id, state,
+            "how many tasks do i have in each status? give me the counts.")
+        assert_calls(r, [
+            {"tool": "persona_data_count", "args": {"trait": ".tasks.json", "field": "status"}},
+        ])
+
+    def test_05_filter_open(self, session_id, state):
+        r = send_prompt(session_id, state,
+            "show me only open tasks. quote their titles.")
+        assert_calls(r, [
+            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+        ])
+        assert_text(r, re.escape(TEST_TASK_SUMMARY))
+
+    def test_06_comment(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"add a comment on the '{TEST_TASK_SUMMARY}' task: 'initial verification passed'")
+        assert_calls(r, [
+            {"tool": "persona_task_comment", "args": {"text": "initial verification passed"}, "output": {"success": True}},
+        ])
+
+    def test_07_delete(self, session_id, state):
+        r = send_prompt(session_id, state,
+            "delete all tasks from .tasks.json")
+        assert_calls(r, [
+            {"tool": "persona_data_delete", "args": {"trait": ".tasks.json"}},
+            {"tool": "persona_data_delete", "args": {"trait": ".tasks.json"}},
+        ], also=[
+            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+        ])
+
+# --- recurring task: create, do work (auto-bump), delete ---
+
+class TestRecurringTask:
+    def test_01_create(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"create a recurring task: {TEST_RECURRING_SUMMARY}. due {TEST_RECURRING_DUE}, repeats every {TEST_RECURRING_INTERVAL}. tell me the task id.")
+        assert_calls(r, [
+            {"tool": "persona_task_create", "args": {"title": TEST_RECURRING_SUMMARY, "due": TEST_RECURRING_DUE, "interval": TEST_RECURRING_INTERVAL}, "output": {"success": True}},
+        ])
+        task_id = r.tool_output(0).get("id", "")
+        assert task_id, f"expected id in tool output\n{r.diag}"
+        assert task_id in r.text, f"expected LLM to relay task id {task_id}\n{r.diag}"
+
+    def test_02_work_on_task(self, session_id, state):
+        """LLM should query tasks, write the trait, and comment."""
+        r = send_prompt(session_id, state,
+            "take action on my next due recurring task immediately")
+        assert_calls(r, [
+            {"tool": "persona_trait_write", "args": {"trait": "poems.md"}, "output": {"success": True}},
+            {"tool": "persona_task_comment", "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+            {"tool": "persona_data_count", "args": {"trait": ".tasks.json"}},
+            {"tool": "evolve_datetime"},
+        ])
+        comment_call = next(c for c in r.calls if c["tool"] == "persona_task_comment")
+        comment_out = parse_tool_output(comment_call["output"])
+        assert comment_out.get("due") == TEST_RECURRING_DUE_BUMPED, (
+            f"expected due auto-bump to {TEST_RECURRING_DUE_BUMPED}\n{r.diag}"
+        )
+
+    def test_03_delete(self, session_id, state):
+        r = send_prompt(session_id, state,
+            "find the task containing 'poem' and delete it from .tasks.json")
+        assert_calls(r, [
+            {"tool": "persona_data_delete", "args": {"trait": ".tasks.json"}},
+        ], also=[
+            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+        ])
+
+# --- trait_move ---
+
+class TestTraitMove:
+    def test_01_create(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"create a trait called {TEST_TRAIT} with content: 'temporary trait for rename test'")
+        assert_calls(r, [
+            {"tool": "persona_trait_write", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+        ])
+
+    def test_02_move(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"rename the trait {TEST_TRAIT} to {TEST_TRAIT_RENAME}")
+        assert_calls(r, [
+            {"tool": "persona_trait_move", "args": {"old_trait": TEST_TRAIT, "new_trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
+        ])
+
+    def test_03_verify_and_cleanup(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"read {TEST_TRAIT_RENAME} and quote its content, then delete it")
+        assert_calls(r, [
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
+            {"tool": "persona_trait_delete", "args": {"trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
+        ])
+        assert_text(r, "rename test")
+
+# --- structured data tools: update, append, query, delete ---
+
+class TestDataLifecycle:
+    def test_01_update_create(self, session_id, state):
+        """create a .json trait by setting a value with data_update."""
+        r = send_prompt(session_id, state,
+            f"set the value of 'color' to 'blue' in the {TEST_DATA_TRAIT} trait")
+        assert_calls(r, [
+            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "color", "value": "blue"}, "output": {"success": True}},
+        ])
+
+    def test_02_update_second_field(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"also set 'size' to the string 'large' in {TEST_DATA_TRAIT}")
+        assert_calls(r, [
+            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "size", "value": "large"}, "output": {"success": True}},
+        ])
+
+    def test_03_query(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"query all fields from {TEST_DATA_TRAIT} and show me the contents.")
+        assert_calls(r, [
+            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+        ])
+        assert_text(r, "blue")
+        assert_text(r, "large")
+
+    def test_04_append_to_array(self, session_id, state):
+        """create an array field and append to it with data_append."""
+        r = send_prompt(session_id, state,
+            f"set 'tags' to an empty array in {TEST_DATA_TRAIT}, then append 'eval' to it")
+        assert_calls(r, [
+            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "tags", "value": []}, "output": {"success": True}},
+            {"tool": "persona_data_append", "args": {"trait": TEST_DATA_TRAIT, "key": "tags", "value": "eval"}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+        ])
+
+    def test_05_verify_append(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"read {TEST_DATA_TRAIT} fresh and tell me what's in the tags array")
+        assert_calls(r, [
+            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+        ])
+        assert_text(r, "eval")
+
+    def test_06_cleanup(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"delete the trait file {TEST_DATA_TRAIT}")
+        assert_calls(r, [
+            {"tool": "persona_trait_delete", "args": {"trait": TEST_DATA_TRAIT}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            {"tool": "persona_record_query"},
+        ])
 
 # --- journal (record) tools: append, query, count ---
 
 class TestJournalLifecycle:
     def test_01_append(self, session_id, state):
-        r = send_prompt(session_id, state, f"add a journal observation: {TEST_JOURNAL_CONTENT}")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_record_append" in tool_names, f"expected record_append call\n{diag}"
-        ra = [c for c in calls if c["tool"] == "persona_record_append"][0]
-        assert ra["input"].get("trait") == ".journal.jsonl", f"expected trait=.journal.jsonl\n{diag}"
-        assert ra["status"] == "completed", f"expected completed status\n{diag}"
-        assert "persona_journal_append" not in tool_names, f"should not use removed journal_append\n{diag}"
+        r = send_prompt(session_id, state,
+            f"add a journal entry. the type is 'observation' and the content is '{TEST_JOURNAL_CONTENT}'")
+        assert_calls(r, [
+            {"tool": "persona_record_append", "args": {"trait": ".journal.jsonl"}, "output": {"success": True}},
+        ])
 
     def test_02_query_finds_entry(self, session_id, state):
-        r = send_prompt(session_id, state, "search my journal for entries about sky. quote the matching content.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_record_query" in tool_names, f"expected record_query call\n{diag}"
-        rq = [c for c in calls if c["tool"] == "persona_record_query"][0]
-        assert rq["input"].get("trait") == ".journal.jsonl", f"expected trait=.journal.jsonl\n{diag}"
-        assert "persona_journal_list" not in tool_names, f"should not use removed journal_list\n{diag}"
-        assert "blue" in text.lower(), f"expected 'blue' in response\n{diag}"
+        r = send_prompt(session_id, state,
+            "search my journal for entries about sky. quote the matching content.")
+        assert_calls(r, [
+            {"tool": "persona_record_query", "args": {"trait": ".journal.jsonl"}},
+        ])
+        assert_text(r, "blue")
 
     def test_03_count(self, session_id, state):
-        r = send_prompt(session_id, state, "how many journal entries do i have? give me the exact number.")
-        calls = extract_tool_calls(r)
-        text = extract_text(r)
-        reasoning = extract_reasoning(r)
-        diag = format_diagnostics(calls, text, reasoning)
-        tool_names = [c["tool"] for c in calls]
-        assert "persona_record_count" in tool_names, f"expected record_count call\n{diag}"
-        rc = [c for c in calls if c["tool"] == "persona_record_count"][0]
-        assert rc["input"].get("trait") == ".journal.jsonl", f"expected trait=.journal.jsonl\n{diag}"
-        assert "persona_journal_count" not in tool_names, f"should not use removed journal_count\n{diag}"
+        r = send_prompt(session_id, state,
+            "how many journal entries do i have? give me the exact number.")
+        assert_calls(r, [
+            {"tool": "persona_record_count", "args": {"trait": ".journal.jsonl"}},
+        ])
+
+# --- browser-use tools: start, navigate, extract, summarize ---
+
+class TestBrowserUse:
+    def test_01_start_session(self, session_id, state):
+        r = send_prompt(session_id, state, "open a browser session")
+        assert_bash_sequence(r, [
+            r"browser-head start",
+        ])
+
+    def test_02_navigate_hackernews(self, session_id, state):
+        r = send_prompt(session_id, state, "go to https://news.ycombinator.com")
+        assert_bash_sequence(r, [
+            r"browser-use.*open.*https://news\.ycombinator\.com",
+        ])
+
+    def test_03_summarize_top_comments(self, session_id, state):
+        """extract links, visit 3 comment threads, summarize to a trait."""
+        r = send_prompt(session_id, state,
+            "visit the comment threads for the top 3 stories on the page. "
+            "for each one, write a one-paragraph summary of the discussion to the research_notes.md trait.")
+        # LLM may navigate via click or open, so just check it used browser-use enough
+        bash_calls = [c for c in r.calls if c["tool"] == "bash"
+                      and "browser-use" in c["input"].get("command", "")]
+        assert len(bash_calls) >= 7, (
+            f"expected at least 7 browser-use calls, got {len(bash_calls)}\n{r.diag}")
+        # should have written to the trait
+        trait_calls = [c for c in r.calls if c["tool"] in ("persona_trait_write", "persona_trait_append")]
+        assert len(trait_calls) >= 1, f"expected trait write/append\n{r.diag}"
+        assert trait_calls[0]["input"].get("trait") == "research_notes.md", (
+            f"expected trait=research_notes.md\n{r.diag}"
+        )
+
+    def test_04_cleanup(self, session_id, state):
+        r = send_prompt(session_id, state, "delete the research_notes.md trait")
+        assert_calls(r, [
+            {"tool": "persona_trait_delete", "args": {"trait": "research_notes.md"}, "output": {"success": True}},
+        ])
+

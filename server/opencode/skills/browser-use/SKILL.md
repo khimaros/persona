@@ -47,9 +47,14 @@ STOP and ask the user to respond to the captcha before continuing.
 | Command | Description |
 | :--- | :--- |
 | `state` | **CRITICAL**: Get current URL, title, and interactive elements with indices |
-| `screenshot [--full] <path>` | Take a screenshot of the current page |
-| `get` | Get specific information |
-| `cookies` | Perform cookie operations |
+| `screenshot [--full] <path>` | Take a screenshot (base64 if no path) |
+| `get title` | Get page title |
+| `get html` | Get full page HTML |
+| `get html --selector "css"` | Get HTML of matching element |
+| `get text <index>` | Get text content of element |
+| `get value <index>` | Get value of input/textarea |
+| `get attributes <index>` | Get all attributes of element |
+| `get bbox <index>` | Get bounding box (x, y, width, height) |
 
 ### Interaction
 | Command | Description |
@@ -67,10 +72,13 @@ STOP and ask the user to respond to the captcha before continuing.
 ### Advanced
 | Command | Description |
 | :--- | :--- |
-| `eval <js>` | Execute JavaScript in the browser (only if explicitly requested) |
-| `extract <query>` | Extract data from the page using LLM (only if explicitly requested) |
-| `python <code>` | Execute Python code with browser access (only if explicitly requested) |
-| `wait <condition>` | Wait for specific conditions |
+| `eval <js>` | Execute JavaScript in the browser |
+| `extract <query>` | Extract structured data from the page using LLM |
+| `wait selector "css"` | Wait for element to be visible |
+| `wait selector "css" --state hidden` | Wait for element to disappear |
+| `wait text "string"` | Wait until text appears on page |
+
+**Tip**: Use `eval "window.open('https://example.com', '_blank')"` to open a link in a new tab.
 
 ### Management
 | Command | Description |
@@ -81,7 +89,7 @@ STOP and ask the user to respond to the captcha before continuing.
 
 ## 📖 Core Rules
 
-1.  **Check State Frequently**: Always run `state` before interacting to ensure you have correct element indices, as they change when the page updates.
+1.  **`state` vs `get`**: Use `state` to discover interactive elements and their indices before clicking/typing. Use `get text`, `get html`, or `get value` to read content from a specific element you already know the index of. `state` is for *what can I interact with?*, `get` is for *what does this element contain?*
 2.  **Handling Forms**: Use `input <index> "text"` to fill fields, then `click <index>` or `keys Enter` to submit.
 3.  **Opening URLs**: Use  `open <url>` to navigate to a URL in the current tab.
 4.  **Troubleshooting**:

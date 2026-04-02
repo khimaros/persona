@@ -34,16 +34,15 @@ provision-user: push-ssh-pubkeys
 	ssh $(USER_NAME)@$(ADDRESS) -- ./incant-user.sh
 .PHONY: provision-user
 
-clear-opencode:
-	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/.config/opencode/
-.PHONY: clear-opencode
-
 reset-workspace: clear-workspace push-workspace
 .PHONY: reset-workspace
 
 clear-workspace:
 	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/workspace/
 .PHONY: clear-workspace
+
+push-clean: clear-opencode clear-workspace push-workspace update push-opencode-providers service-restart
+.PHONY: push-clean
 
 push: update push-opencode-providers push-workspace-config push-workspace-tests service-restart
 .PHONY: push
@@ -55,7 +54,6 @@ push-workspace:
 push-workspace-traits-base:
 	incus file push ./workspace/traits/AGENTS.md $(INSTANCE)/$(USER_HOME)/workspace/traits/
 	incus file push ./workspace/traits/TOOLS.md $(INSTANCE)/$(USER_HOME)/workspace/traits/
-	incus file push ./workspace/traits/HEARTBEAT.md $(INSTANCE)/$(USER_HOME)/workspace/traits/
 .PHONY: push-workspace-traits-base
 
 push-workspace-tests:
@@ -76,6 +74,10 @@ push-ssh-pubkeys:
 	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 /tmp/incant-authorized_keys $(INSTANCE)/$(USER_HOME)/.ssh/authorized_keys; rm /tmp/incant-authorized_keys
 	ssh $(USER_NAME)@$(ADDRESS) -o StrictHostKeyChecking=accept-new -- true
 .PHONY: push-ssh-pubkeys
+
+clear-opencode:
+	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/.config/opencode/
+.PHONY: clear-opencode
 
 push-opencode-auth:
 	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 $(HOME)/.local/share/opencode/auth.json $(INSTANCE)/$(USER_HOME)/.local/share/opencode/
