@@ -8,14 +8,18 @@ API_BASE?="http://$(API_HOST):7860/v1"
 
 ADDRESS=$(shell incus list -f json $(INSTANCE) | jq -r '.[0].state.network.eth0.addresses[] | select(.family == "inet") .address' | head -n 1)
 
+DEV?=0
+
+OPENCODE_DEV_DIR?=../../../anomalyco/opencode
+EVOLVE_DEV_DIR?=../../opencode-evolve
+BRIDGE_DEV_DIR?=../../opencode-bridge
+BROWSER_USE_DEV_DIR?=../../../browser-use/browser-use
+
 default:
 .PHONY: default
 
 create: up push-workspace provision-user
 .PHONY: create
-
-update: provision provision-user
-.PHONY: update
 
 bootstrap:
 	sudo apt install incant jq
@@ -29,23 +33,39 @@ provision:
 	incant provision $(INSTANCE)
 .PHONY: provision
 
-provision-user: push-ssh-pubkeys
+push-sources-dev:
+	rsync -a --delete --filter=':- .gitignore' --exclude=.git $(OPENCODE_DEV_DIR)/ $(USER_NAME)@$(ADDRESS):opencode/
+	rsync -a --delete --filter=':- .gitignore' --exclude=.git $(BROWSER_USE_DEV_DIR)/ $(USER_NAME)@$(ADDRESS):browser-use/
+	mkdir -p /tmp/persona-dev
+	cd $(EVOLVE_DEV_DIR) && npm pack --pack-destination /tmp/persona-dev/
+	cd $(BRIDGE_DEV_DIR) && npm pack --pack-destination /tmp/persona-dev/
+	scp /tmp/persona-dev/*.tgz $(USER_NAME)@$(ADDRESS):/tmp/
+	rm -rf /tmp/persona-dev/
+.PHONY: push-sources-dev
+
+provision-user: push-ssh-pubkeys $(if $(filter 1,$(DEV)),push-sources-dev)
 	incus file push --mode 0755 --uid 1000 --gid 1000 ./incant-user.sh $(INSTANCE)/$(USER_HOME)/incant-user.sh
-	ssh $(USER_NAME)@$(ADDRESS) -- ./incant-user.sh
+	ssh $(USER_NAME)@$(ADDRESS) -- DEV=$(DEV) ./incant-user.sh
 .PHONY: provision-user
 
-reset-workspace: clear-workspace push-workspace
+reset-workspace: delete-workspace push-workspace
 .PHONY: reset-workspace
 
-clear-workspace:
+delete-workspace:
 	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/workspace/
-.PHONY: clear-workspace
+.PHONY: delete-workspace
 
-push-clean: clear-opencode clear-workspace push-workspace update push-opencode-providers service-restart
-.PHONY: push-clean
+reset: delete-opencode delete-workspace push-workspace
+.PHONY: reset
+
+update: provision provision-user
+.PHONY: update
 
 push: update push-opencode-providers push-workspace-config push-workspace-tests service-restart
 .PHONY: push
+
+push-reset: reset push
+.PHONY: push-reset
 
 push-workspace:
 	incus file push --recursive ./workspace/ $(INSTANCE)/$(USER_HOME)/
@@ -75,9 +95,9 @@ push-ssh-pubkeys:
 	ssh $(USER_NAME)@$(ADDRESS) -o StrictHostKeyChecking=accept-new -- true
 .PHONY: push-ssh-pubkeys
 
-clear-opencode:
+delete-opencode:
 	ssh $(USER_NAME)@$(ADDRESS) -- rm -rf $(USER_HOME)/.config/opencode/
-.PHONY: clear-opencode
+.PHONY: delete-opencode
 
 push-opencode-auth:
 	incus file push --create-dirs --mode 0600 --uid 1000 --gid 1000 $(HOME)/.local/share/opencode/auth.json $(INSTANCE)/$(USER_HOME)/.local/share/opencode/
@@ -87,9 +107,9 @@ push-opencode-providers:
 	ssh $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/update-opencode-models --api-base $(API_BASE)
 .PHONY: push-opencode-providers
 
-cleanup-browsers:
+kill-browsers:
 	ssh $(USER_NAME)@$(ADDRESS) -- pkill -9 -f browser
-.PHONY: cleanup-browsers
+.PHONY: kill-browsers
 
 service-restart:
 	ssh $(USER_NAME)@$(ADDRESS) -- systemctl --user restart opencode.service

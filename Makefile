@@ -10,7 +10,7 @@ test:
 
 eval:
 	make INSTANCE=$(INSTANCE) -C server/ reset-workspace service-restart && sleep 5
-	OPENCODE_URL=http://$(ADDRESS):4096 OPENCODE_DIR=$(USER_HOME)/workspace OPENCODE_MODEL=openai-compatible/qwen3.5-27b:Q8_0 pytest evals/persona_eval.py -v -W all
+	OPENCODE_URL=http://$(ADDRESS):4096 OPENCODE_DIR=$(USER_HOME)/workspace OPENCODE_MODEL=openai-compatible/gemma-4-31b-it:Q8_0 pytest evals/persona_eval.py -v -W all
 .PHONY: eval
 
 precommit: test
