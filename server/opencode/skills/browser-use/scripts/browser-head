@@ -17,6 +17,12 @@ cmd_start() {
     return 0
   fi
 
+  # remove stale lock from unclean shutdown to avoid "profile in use" errors
+  if [ -e "${CHROME_PROFILE}/SingletonLock" ] && ! pgrep -f "user-data-dir=${CHROME_PROFILE}" >/dev/null; then
+    echo "[*] removing stale SingletonLock..."
+    rm -f "${CHROME_PROFILE}/SingletonLock"
+  fi
+
   local chrome_args=(
     --user-data-dir="${CHROME_PROFILE}"
     --remote-debugging-port="${DEBUG_PORT}"
