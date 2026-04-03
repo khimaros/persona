@@ -85,7 +85,7 @@ install_opencode_dev() {
 
 build_opencode() {
   npm -g install bun
-  bun install
+  #bun install --verbose --production
   ./packages/opencode/script/build.ts --single
   systemctl --user stop opencode.service || true
   cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
@@ -114,13 +114,13 @@ install_browser_use() {
   #cargo install --locked uv
   which uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
   #uv tool install -U browser-use[cli]
-  uv tool install -U git+https://github.com/khimaros/browser-use[cli]
+  uv tool install --force -U git+https://github.com/khimaros/browser-use[cli]
 }
 
 # DEV: install from ~/browser-use pushed via rsync
 install_browser_use_dev() {
   which uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-  uv tool install -U ~/browser-use[cli]
+  uv tool install --force -U ~/browser-use[cli]
 }
 
 main() {

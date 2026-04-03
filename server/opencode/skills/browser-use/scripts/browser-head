@@ -36,7 +36,13 @@ cmd_start() {
   echo "[*] waiting for chrome to accept connections (pid ${chrome_pid})..."
   for i in $(seq 1 "${CONNECT_RETRIES}"); do
     if ! kill -0 "${chrome_pid}" 2>/dev/null; then
-      echo "[!] chrome exited unexpectedly, log:"
+      # chrome failed to start — another instance may already be running
+      echo "[*] chrome process exited, checking for existing instance..."
+      if browser-use --connect state >/dev/null 2>&1; then
+        echo "[*] connected to existing chrome instance"
+        return 0
+      fi
+      echo "[!] chrome exited and no existing instance found, log:"
       tail -20 "${logfile}"
       return 1
     fi
