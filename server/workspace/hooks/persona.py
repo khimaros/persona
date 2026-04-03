@@ -662,7 +662,7 @@ def _stable_sort_record(record):
 @tool(permission={"arg": "trait"})
 def record_append(
     trait: Annotated[str, TRAIT_JSONL_DESC],
-    fields: Annotated[object, param('object of field names to values, e.g. {"type": "observation", "content": "saw a bird", "meta": {"source": "web"}}. values can be strings, numbers, booleans, arrays, or nested objects', type="object")] = None,
+    fields: Annotated[object, param('flat object mapping field names directly to values. example: {"type": "observation", "content": "saw a bird"}. each key is a field name, each value is the literal value to store (string, number, boolean, array, or object). do NOT wrap values in extra objects — pass them directly', type="object")] = None,
 ) -> HookResult:
     """append a timestamped record to a .jsonl trait. timestamp is added automatically"""
     try:
