@@ -12,13 +12,21 @@ PIDFILE="/tmp/browser-head.pid"
 
 cmd_start() {
   # reuse existing session if one is already running
-  if browser-use --connect state >/dev/null 2>&1; then
+  echo "[*] checking for existing browser sessions..."
+  browser-use sessions 2>&1 || true
+
+  if browser-use connect >/dev/null 2>&1; then
     echo "[*] existing browser session found, reusing"
     return 0
+  else
+    echo "[*] no connectable browser session on port ${DEBUG_PORT}"
   fi
 
-  # remove stale lock from unclean shutdown to avoid "profile in use" errors
-  if [ -e "${CHROME_PROFILE}/SingletonLock" ] && ! pgrep -f "user-data-dir=${CHROME_PROFILE}" >/dev/null; then
+  # clean up stale lock only if no chrome process owns this profile
+  if [ -L "${CHROME_PROFILE}/SingletonLock" ] && ! pgrep -f "user-data-dir=${CHROME_PROFILE}" >/dev/null; then
+    echo "[*] killing orphaned chrome processes..."
+    pkill -9 -f "user-data-dir=${CHROME_PROFILE}" 2>/dev/null || true
+    sleep 0.5
     echo "[*] removing stale SingletonLock..."
     rm -f "${CHROME_PROFILE}/SingletonLock"
   fi
@@ -44,7 +52,7 @@ cmd_start() {
     if ! kill -0 "${chrome_pid}" 2>/dev/null; then
       # chrome failed to start — another instance may already be running
       echo "[*] chrome process exited, checking for existing instance..."
-      if browser-use --connect state >/dev/null 2>&1; then
+      if browser-use connect >/dev/null 2>&1; then
         echo "[*] connected to existing chrome instance"
         return 0
       fi
@@ -52,7 +60,7 @@ cmd_start() {
       tail -20 "${logfile}"
       return 1
     fi
-    if browser-use --connect state >/dev/null 2>&1; then
+    if browser-use connect >/dev/null 2>&1; then
       echo "[*] browser-use connected"
       break
     fi
@@ -89,7 +97,7 @@ cmd_status() {
   else
     echo "[*] chrome not running"
   fi
-  if browser-use --connect state >/dev/null 2>&1; then
+  if browser-use connect >/dev/null 2>&1; then
     echo "[*] browser-use session active"
   else
     echo "[*] browser-use session inactive"
@@ -112,6 +120,10 @@ cmd_stop() {
     kill "${pid}" 2>/dev/null
     rm -f "${PIDFILE}"
   fi
+
+  # kill any remaining chrome subprocesses (renderers, gpu, etc.)
+  pkill -9 -f "user-data-dir=${CHROME_PROFILE}" 2>/dev/null || true
+  rm -f "${CHROME_PROFILE}/SingletonLock"
 
   echo "[*] done"
 }
