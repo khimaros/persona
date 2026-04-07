@@ -35,5 +35,12 @@ conventions for common workflows:
   with persona_record_count. use for recording observations, decisions,
   events, and notes that accumulate over time.
 
+- browser: invoke the browser-use skill first, then follow its instructions.
+
 rule of thumb: if the data has fields → persona_data_*. if it grows over time
 → persona_record_*. if it's best read as a paragraph → persona_trait_*.
+
+never use bash, shell commands, or the generic read/write/edit tools for any
+trait operation — including existence checks, listing, reading, or writing.
+always use persona_trait_* and persona_data_* / persona_record_* tools instead,
+even for .md files in the traits directory.

@@ -177,7 +177,7 @@ def trait_write(
     trait: Annotated[str, TRAIT_DESC],
     content: Annotated[str, "full content for the trait"],
 ) -> HookResult:
-    """write a trait to the persona. parent directories are created automatically"""
+    """create or overwrite a trait in the persona. preferred for new traits or full replacements. parent directories are created automatically"""
     try:
         path = trait_path(trait)
     except ValueError as e:
@@ -217,7 +217,7 @@ def trait_append(
     trait: Annotated[str, TRAIT_DESC],
     content: Annotated[str, "text to append to the trait"],
 ) -> HookResult:
-    """append text to the end of a trait. creates the trait if it doesn't exist"""
+    """append text to the end of an existing trait. use trait_write to create new traits or replace all content"""
     try:
         path = trait_path(trait)
     except ValueError as e:
@@ -230,7 +230,7 @@ def trait_append(
 def trait_delete(
     trait: Annotated[str, TRAIT_DESC],
 ) -> HookResult:
-    """delete a trait from the persona. empty parent directories are removed automatically"""
+    """delete a trait file from the persona. empty parent directories are removed automatically. WARNING: for .json/.jsonl traits, use data_delete or log_delete to remove individual entries instead of deleting the whole file"""
     try:
         path = trait_path(trait)
     except ValueError as e:
@@ -267,6 +267,9 @@ def trait_move(
 
 def resolve_key(data, key):
     """walk a dot-path key, returning (parent, final_key, exists)."""
+    if not key:
+        return None, None, True
+    key = key.lstrip(".")
     if not key:
         return None, None, True
     parts = key.split(".")
@@ -338,11 +341,14 @@ def delete_at_key(data, key):
     return data, False
 
 def append_at_key(data, key, value):
-    """append value to array at dot-path key, returning success."""
+    """append value(s) to array at dot-path key. lists are extended, scalars appended."""
     target = get_at_key(data, key) if key else data
     if not isinstance(target, list):
         return data, False
-    target.append(value)
+    if isinstance(value, list):
+        target.extend(value)
+    else:
+        target.append(value)
     return data, True
 
 def load_json_trait(name):
@@ -652,6 +658,29 @@ def append_record(name, record):
     """append a single JSON record to a .jsonl trait."""
     append_to_trait(name, json.dumps(record, ensure_ascii=False) + "\n")
 
+def _normalize_field_value(v):
+    """unwrap common LLM-introduced wrappers like {"$literal": x}, {"$value": x},
+    or single-key dicts wrapping a primitive (e.g. {"observation": "observation"})."""
+    if isinstance(v, dict) and len(v) == 1:
+        only_key = next(iter(v))
+        only_val = v[only_key]
+        if only_key in ("$literal", "$value", "$const"):
+            return only_val
+        if isinstance(only_val, (str, int, float, bool)):
+            return only_val
+    return v
+
+def _normalize_fields(fields):
+    """normalize common LLM nesting mistakes for record_append fields."""
+    if not isinstance(fields, dict):
+        return fields
+    # case: single key whose value is a dict — use inner dict (sibling nesting)
+    if len(fields) == 1:
+        only_value = next(iter(fields.values()))
+        if isinstance(only_value, dict) and only_value:
+            fields = only_value
+    return {k: _normalize_field_value(v) for k, v in fields.items()}
+
 def _stable_sort_record(record):
     """sort record keys alphabetically, id first."""
     keys = sorted(record.keys())
@@ -671,6 +700,7 @@ def record_append(
         trait_path(trait)  # validate path
         if not isinstance(fields, dict) or not any(v for v in fields.values()):
             return {"result": result_err("fields must be a JSON object with at least one non-empty value")}
+        fields = _normalize_fields(fields)
         record = {"timestamp": format_iso(datetime.now(timezone.utc))}
         record.update(fields)
         append_record(trait, record)
@@ -717,7 +747,7 @@ def record_count(
     field: Annotated[str, param("group by this field (supports dot-paths like meta.source) and count occurrences of each unique value (e.g. field='status' → {\"open\": 5, \"done\": 3})", optional=True)] = "",
     filter: Annotated[object, param(FILTER_JSONL_DESC, type="object", optional=True)] = None,
 ) -> HookResult:
-    """count records in a .jsonl trait. without field: returns total count and field names. with field: groups by that field and returns count per unique value"""
+    """count records in a .jsonl trait. without field: returns total count ("count") and a summary of which field names exist ("fields" — not a filter, just metadata). with field: groups by that field's values and returns count per unique value"""
     try:
         filter = _coerce_json(filter, dict)
         records = load_records(trait)
@@ -802,7 +832,7 @@ def task_create(
         now = format_iso(datetime.now(timezone.utc))
         task = {"title": title, "status": status, "created": now, "updated": now}
         if isinstance(fields, dict):
-            task.update(fields)
+            task.update(_normalize_fields(fields))
         if description:
             task["description"] = description
         if due:
@@ -832,7 +862,7 @@ def task_update(
         if id not in tasks:
             return {"result": result_err(f"not found: {id}")}
         if isinstance(fields, dict):
-            tasks[id].update(fields)
+            tasks[id].update(_normalize_fields(fields))
         if due:
             validate_iso_datetime(due)
             tasks[id]["due"] = due

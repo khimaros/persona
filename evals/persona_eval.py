@@ -71,9 +71,10 @@ def wait_idle(session_id):
 # --- response parsing ---
 
 class Response:
-    """parsed LLM response with tool calls, text, and reasoning."""
+    """parsed LLM response with tool calls, text, reasoning, and full part history."""
     def __init__(self, raw):
         parts = raw.get("parts", [])
+        self.parts = parts
         self.calls = []
         for p in parts:
             if p.get("type") == "tool":
@@ -91,7 +92,7 @@ class Response:
 
     @property
     def diag(self):
-        return format_diagnostics(self.calls, self.text, self.reasoning)
+        return format_diagnostics(self.calls, self.text, self.reasoning, self.parts)
 
     def tool_output(self, index):
         """parse JSON output of tool call at index."""
@@ -127,14 +128,18 @@ def format_call(c):
         s += f"\n      error: {c['output'][:200]}"
     return s
 
-def format_diagnostics(calls, text, reasoning):
+def format_diagnostics(calls, text, reasoning, parts=None):
     lines = [f"actual calls ({len(calls)}):"]
     for i, c in enumerate(calls):
         lines.append(f"  [{i}] {format_call(c)}")
     if text:
-        lines.append(f"text: {text[:400]}")
+        lines.append(f"text: {text}")
     if reasoning:
-        lines.append(f"reasoning: {reasoning[:500]}")
+        lines.append(f"reasoning: {reasoning}")
+    if parts:
+        lines.append(f"parts ({len(parts)}):")
+        for i, p in enumerate(parts):
+            lines.append(f"  [{i}] {json.dumps(p, ensure_ascii=False)}")
     return "\n".join(lines)
 
 def parse_tool_output(output):
@@ -146,41 +151,94 @@ def parse_tool_output(output):
     except (json.JSONDecodeError, TypeError):
         return {}
 
-def _check_call(actual, exp, prefix, diag):
-    """validate a single actual call against an expected spec."""
-    assert actual["tool"] == exp["tool"], (
-        f"{prefix}: expected {exp['tool']}, got {actual['tool']}\n{diag}"
-    )
-    expected_status = exp.get("status", "completed")
-    assert actual["status"] == expected_status, (
-        f"{prefix} {actual['tool']}: expected status={expected_status}, "
-        f"got status={actual['status']}\n{diag}"
-    )
-    if "args" in exp:
-        ok, msg = match_args(exp["args"], actual["input"])
-        assert ok, (
-            f"{prefix} {actual['tool']} args: {msg}\n"
-            f"  expected: {exp['args']}\n"
-            f"  actual:   {actual['input']}\n{diag}"
-        )
-    if "output" in exp:
+class Call:
+    """expected tool call spec with | support for alternatives."""
+    __slots__ = ("tool", "args", "status", "output")
+
+    def __init__(self, tool, args=None, status="completed", output=None):
+        self.tool = tool
+        self.args = args
+        self.status = status
+        self.output = output
+
+    def __or__(self, other):
+        if isinstance(other, AnyOf):
+            return AnyOf([self] + other.alts)
+        return AnyOf([self, other])
+
+    def __repr__(self):
+        return self.tool
+
+C = Call
+
+class AnyOf:
+    """one of several alternative call specs, created via Call | Call."""
+    __slots__ = ("alts",)
+
+    def __init__(self, alts):
+        self.alts = alts
+
+    def __or__(self, other):
+        if isinstance(other, AnyOf):
+            return AnyOf(self.alts + other.alts)
+        return AnyOf(self.alts + [other])
+
+    def __repr__(self):
+        return " | ".join(repr(a) for a in self.alts)
+
+def _as_call(spec):
+    """normalize a dict or Call into a Call."""
+    if isinstance(spec, (Call, AnyOf)):
+        return spec
+    return Call(spec["tool"], spec.get("args"), spec.get("status", "completed"), spec.get("output"))
+
+def _try_match(actual, call):
+    """check a single actual call against a Call spec, returning (ok, error_msg)."""
+    if actual["tool"] != call.tool:
+        return False, f"expected {call.tool}, got {actual['tool']}"
+    if actual["status"] != call.status:
+        return False, f"expected status={call.status}, got status={actual['status']}"
+    if call.args is not None:
+        ok, msg = match_args(call.args, actual["input"])
+        if not ok:
+            return False, f"args: {msg}"
+    if call.output is not None:
         parsed = parse_tool_output(actual["output"])
-        ok, msg = match_args(exp["output"], parsed)
-        assert ok, (
-            f"{prefix} {actual['tool']} output: {msg}\n"
-            f"  expected: {exp['output']}\n"
-            f"  actual:   {parsed}\n{diag}"
+        ok, msg = match_args(call.output, parsed)
+        if not ok:
+            return False, f"output: {msg}"
+    return True, ""
+
+def _tool_names(spec):
+    """all possible tool names from a Call or AnyOf."""
+    spec = _as_call(spec)
+    if isinstance(spec, AnyOf):
+        return {a.tool for a in spec.alts}
+    return {spec.tool}
+
+def _check_call(actual, spec, prefix, diag):
+    """validate an actual call against a spec (Call, AnyOf, or dict)."""
+    spec = _as_call(spec)
+    if isinstance(spec, AnyOf):
+        errors = []
+        for alt in spec.alts:
+            ok, msg = _try_match(actual, alt)
+            if ok:
+                return
+            errors.append(f"  {alt.tool}: {msg}")
+        assert False, (
+            f"{prefix}: expected one of {spec}, got {actual['tool']}\n"
+            + "\n".join(errors) + f"\n{diag}"
         )
+    ok, msg = _try_match(actual, spec)
+    assert ok, f"{prefix} {spec.tool}: {msg}\n{diag}"
 
 def assert_calls(r, expect, also=None):
     """assert tool calls match expected sequence exactly.
 
     r: Response object
-    expect: list of dicts, each with:
-        tool: exact tool name
-        args: dict of arg key/values to subset-match (optional)
-        status: expected status, default "completed" (optional)
-        output: dict of output key/values to subset-match (optional)
+    expect: list of Call, AnyOf, or dicts. each specifies a required call
+        in order. use Call("tool") | Call("tool") for alternatives.
     also: list of permitted extra call specs (same format as expect).
         extra calls matching any spec in also may appear anywhere
         without causing a count/order mismatch. required calls in
@@ -188,12 +246,15 @@ def assert_calls(r, expect, also=None):
         and also (required once, extras permitted).
     """
     also = also or []
-    also_names = {a["tool"] for a in also}
+    exp_names = [_tool_names(e) for e in expect]
+    also_names = set()
+    for a in also:
+        also_names |= _tool_names(a)
     # greedily match actual calls against expect in order
     required, extras = [], []
     ei = 0
     for c in r.calls:
-        if ei < len(expect) and c["tool"] == expect[ei]["tool"]:
+        if ei < len(expect) and c["tool"] in exp_names[ei]:
             required.append(c)
             ei += 1
         elif c["tool"] in also_names:
@@ -202,15 +263,15 @@ def assert_calls(r, expect, also=None):
             required.append(c)
     assert len(required) == len(expect), (
         f"expected {len(expect)} required call(s), got {len(required)}\n"
-        f"expected: {[e['tool'] for e in expect]}\n"
-        f"also permitted: {[a['tool'] for a in also]}\n"
+        f"expected: {[repr(e) for e in expect]}\n"
+        f"also permitted: {[repr(a) for a in also]}\n"
         f"extras: {[c['tool'] for c in extras]}\n{r.diag}"
     )
     for i, (actual, exp) in enumerate(zip(required, expect)):
         _check_call(actual, exp, f"call [{i}]", r.diag)
     # validate each extra call against its matching also spec
     for c in extras:
-        spec = next(a for a in also if a["tool"] == c["tool"])
+        spec = next(a for a in also if c["tool"] in _tool_names(a))
         _check_call(c, spec, f"also[{c['tool']}]", r.diag)
     if extras:
         names = [c["tool"] for c in extras]
@@ -389,16 +450,30 @@ class TestTaskLifecycle:
             f"add a comment on the '{TEST_TASK_SUMMARY}' task: 'initial verification passed'")
         assert_calls(r, [
             {"tool": "persona_task_comment", "args": {"text": "initial verification passed"}, "output": {"success": True}},
-        ])
-
-    def test_07_delete(self, session_id, state):
-        r = send_prompt(session_id, state,
-            "delete all tasks from .tasks.json")
-        assert_calls(r, [
-            {"tool": "persona_data_delete", "args": {"trait": ".tasks.json"}},
-            {"tool": "persona_data_delete", "args": {"trait": ".tasks.json"}},
         ], also=[
             {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+        ])
+
+    def test_07_delete_specific(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"delete the '{TEST_TASK_SUMMARY}' task from .tasks.json by its id")
+        assert_calls(r, [
+            C("persona_data_delete", args={"trait": ".tasks.json"}),
+        ], also=[
+            C("persona_data_query", args={"trait": ".tasks.json"}),
+        ])
+
+    def test_08_delete_all(self, session_id, state):
+        r = send_prompt(session_id, state,
+            "delete all remaining tasks from .tasks.json")
+        assert_calls(r, [
+            C("persona_data_delete", args={"trait": ".tasks.json"})
+            | C("persona_trait_delete", args={"trait": ".tasks.json"}, output={"success": True})
+            | C("persona_data_update", args={"trait": ".tasks.json", "value": {}}),
+        ], also=[
+            C("persona_data_query", args={"trait": ".tasks.json"}),
+            C("persona_data_delete", args={"trait": ".tasks.json"}),
+            C("persona_data_count", args={"trait": ".tasks.json"}),
         ])
 
 # --- recurring task: create, do work (auto-bump), delete ---
@@ -417,14 +492,17 @@ class TestRecurringTask:
     def test_02_work_on_task(self, session_id, state):
         """LLM should query tasks, write the trait, and comment."""
         r = send_prompt(session_id, state,
-            "take action on my next due recurring task immediately")
+            "do the work described by my next due recurring task right now")
         assert_calls(r, [
-            {"tool": "persona_trait_write", "args": {"trait": "poems.md"}, "output": {"success": True}},
-            {"tool": "persona_task_comment", "output": {"success": True}},
+            C("persona_trait_write", args={"trait": "poems.md"}, output={"success": True})
+            | C("persona_trait_append", args={"trait": "poems.md"}, output={"success": True}),
+            C("persona_task_comment", output={"success": True}),
         ], also=[
-            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
-            {"tool": "persona_data_count", "args": {"trait": ".tasks.json"}},
-            {"tool": "evolve_datetime"},
+            C("persona_data_query", args={"trait": ".tasks.json"}),
+            C("persona_data_count", args={"trait": ".tasks.json"}),
+            C("evolve_datetime"),
+            C("glob"),
+            C("persona_trait_read", args={"trait": "poems.md"}),
         ])
         comment_call = next(c for c in r.calls if c["tool"] == "persona_task_comment")
         comment_out = parse_tool_output(comment_call["output"])
@@ -449,6 +527,8 @@ class TestTraitMove:
             f"create a trait called {TEST_TRAIT} with content: 'temporary trait for rename test'")
         assert_calls(r, [
             {"tool": "persona_trait_write", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
         ])
 
     def test_02_move(self, session_id, state):
@@ -478,6 +558,8 @@ class TestDataLifecycle:
             f"set the value of 'color' to 'blue' in the {TEST_DATA_TRAIT} trait")
         assert_calls(r, [
             {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "color", "value": "blue"}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
         ])
 
     def test_02_update_second_field(self, session_id, state):
@@ -485,6 +567,8 @@ class TestDataLifecycle:
             f"also set 'size' to the string 'large' in {TEST_DATA_TRAIT}")
         assert_calls(r, [
             {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "size", "value": "large"}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
         ])
 
     def test_03_query(self, session_id, state):
@@ -502,9 +586,11 @@ class TestDataLifecycle:
             f"set 'tags' to an empty array in {TEST_DATA_TRAIT}, then append 'eval' to it")
         assert_calls(r, [
             {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "tags", "value": []}, "output": {"success": True}},
-            {"tool": "persona_data_append", "args": {"trait": TEST_DATA_TRAIT, "key": "tags", "value": "eval"}, "output": {"success": True}},
+            C("persona_data_append", args={"trait": TEST_DATA_TRAIT, "key": "tags", "value": "eval"}, output={"success": True})
+            | C("persona_data_append", args={"trait": TEST_DATA_TRAIT, "key": "tags", "value": ["eval"]}, output={"success": True}),
         ], also=[
             {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            C("persona_data_append", args={"trait": TEST_DATA_TRAIT, "key": "tags"}),
         ])
 
     def test_05_verify_append(self, session_id, state):
@@ -533,6 +619,8 @@ class TestJournalLifecycle:
             f"add a journal entry. the type is 'observation' and the content is '{TEST_JOURNAL_CONTENT}'")
         assert_calls(r, [
             {"tool": "persona_record_append", "args": {"trait": ".journal.jsonl"}, "output": {"success": True}},
+        ], also=[
+            C("persona_record_query", args={"trait": ".journal.jsonl"}),
         ])
 
     def test_02_query_finds_entry(self, session_id, state):

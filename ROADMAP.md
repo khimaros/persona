@@ -11,6 +11,7 @@
     [~] browser_url_remove("https://github.com/khimaros/*", "allow")
     [~] patch("~/.config/opencode/plugins/persona.ts", oldString, newString)
     [~] patch("~/.config/opencode/tools/persona.ts", oldString, newString)
+[ ] fix tool descriptions to prevent trait_delete on .json traits and trait_append on new traits
 [ ] speech-to-text and text-to-speech for chats
 [~] enable default ask and whitelist allow for browser-use
 [~] immutable system prompt + one-round-delay notification messages

@@ -978,6 +978,32 @@ try:
     os.remove(new_path)
     os.remove(os.path.join(tmp, "traits", ".test.json"))
 
+    # --- data_append: list value extends instead of nesting ---
+
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"tags": ["a"]}')
+    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "key": "tags", "value": ["b", "c"]})
+    parsed = result_json(r)
+    check("data_append list extends array", parsed.get("success") is True, f"got: {parsed}")
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_append list value extended", data["tags"] == ["a", "b", "c"])
+    os.remove(os.path.join(tmp, "traits", ".test.json"))
+
+    # --- data_update: leading dot in key is stripped ---
+
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"color": "red"}')
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": ".color", "value": "blue"})
+    parsed = result_json(r)
+    check("data_update leading dot key succeeds", parsed.get("success") is True, f"got: {parsed}")
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update leading dot key correct", data["color"] == "blue")
+
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": ".size", "value": "large"})
+    parsed = result_json(r)
+    check("data_update leading dot new key succeeds", parsed.get("success") is True, f"got: {parsed}")
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update leading dot new key correct", data.get("size") == "large")
+    os.remove(os.path.join(tmp, "traits", ".test.json"))
+
     # --- data_count ---
 
     open(os.path.join(tmp, "traits", ".dc.json"), "w").write(json.dumps({
@@ -1273,6 +1299,28 @@ try:
         check("record_count nested grouping uses json not str", "'" not in k, f"got key: {k}")
 
     os.remove(os.path.join(tmp, "traits", nested_jsonl))
+
+    # --- record_append: field normalization (LLM nesting mistakes) ---
+
+    norm_jsonl = ".norm_test.jsonl"
+    # $literal wrapper
+    r, _, _ = call_tool(hook, "record_append", {"trait": norm_jsonl,
+        "fields": {"type": {"$literal": "obs"}, "content": {"$literal": "hi"}}})
+    check("record_append unwraps $literal", result_json(r).get("success") is True)
+    rec = json.loads(open(os.path.join(tmp, "traits", norm_jsonl)).read().strip())
+    check("record_append $literal type unwrapped", rec.get("type") == "obs")
+    check("record_append $literal content unwrapped", rec.get("content") == "hi")
+
+    # single-key wrapping the whole record
+    os.remove(os.path.join(tmp, "traits", norm_jsonl))
+    r, _, _ = call_tool(hook, "record_append", {"trait": norm_jsonl,
+        "fields": {"content": {"type": "obs", "content": "hi"}}})
+    check("record_append unwraps single-key sibling nest", result_json(r).get("success") is True)
+    rec = json.loads(open(os.path.join(tmp, "traits", norm_jsonl)).read().strip())
+    check("record_append nested type unwrapped", rec.get("type") == "obs")
+    check("record_append nested content unwrapped", rec.get("content") == "hi")
+
+    os.remove(os.path.join(tmp, "traits", norm_jsonl))
 
     os.remove(os.path.join(tmp, "traits", ".test.jsonl"))
 
