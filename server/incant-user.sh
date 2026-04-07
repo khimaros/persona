@@ -85,8 +85,10 @@ install_opencode_dev() {
 
 build_opencode() {
   npm -g install bun
-  #bun install --verbose --production
-  ./packages/opencode/script/build.ts --single
+  bun install
+  # DEV rsync omits .git; the build script needs a channel name and falls
+  # back to `git branch --show-current` if OPENCODE_CHANNEL is unset.
+  OPENCODE_CHANNEL=dev ./packages/opencode/script/build.ts --single
   systemctl --user stop opencode.service || true
   cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
 }
