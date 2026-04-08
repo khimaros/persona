@@ -165,7 +165,7 @@ console:
 .PHONY: console
 
 console-opencode:
-	@clear
+	#@clear
 	@ssh -t $(USER_NAME)@$(ADDRESS) -- journalctl --user -u opencode -o cat -f
 .PHONY: console-opencode
 

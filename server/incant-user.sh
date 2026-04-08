@@ -4,79 +4,80 @@ set -xeuo pipefail
 
 export PATH="${HOME}/.local/bin:${PATH}"
 
-# copy local @opencode-ai/plugin and stamp package.json with the dev version
-# so opencode's needsInstall() is satisfied at startup.
-#
-# opencode's needsInstall() skips bun install when:
-#   1. node_modules/@opencode-ai/plugin exists
-#   2. package.json has @opencode-ai/plugin == Installation.VERSION
-# so we pre-seed both to prevent the startup install from hitting npm.
-seed_plugin() {
-  local dir="$1"
-  local version="$2"
-  mkdir -p "$dir/node_modules/@opencode-ai"
-  for pkg in plugin sdk; do
-    rm -rf "$dir/node_modules/@opencode-ai/$pkg"
-    cp -rL ~/opencode/node_modules/@opencode-ai/$pkg "$dir/node_modules/@opencode-ai/$pkg"
-  done
+OPENCODE_DIRS=(~/.config/opencode ~/.opencode)
+PLUGIN_NAMES=(opencode-evolve opencode-bridge)
+
+PLUGIN_BUNDLE=~/opencode/packages/plugin/dist/index.js
+SDK_BUNDLE=~/opencode/packages/sdk/js/dist/client.js
+
+# satisfy opencode's auto-install (Npm.install in packages/opencode/src/npm/index.ts)
+# by writing a package.json + lockfile pair where every declared dep is also
+# locked, so the "in sync" fast path runs and reify never fires.
+write_manifest() {
+  local dir="$1" version="$2"
   node -e "
     const fs = require('fs');
-    const mf = '$dir/node_modules/@opencode-ai/plugin/package.json';
-    const m = JSON.parse(fs.readFileSync(mf));
-    m.version = '$version';
-    fs.writeFileSync(mf, JSON.stringify(m, null, 2));
-    const pf = '$dir/package.json';
-    const p = fs.existsSync(pf) ? JSON.parse(fs.readFileSync(pf)) : {};
-    p.dependencies = p.dependencies || {};
-    p.dependencies['@opencode-ai/plugin'] = '$version';
-    fs.writeFileSync(pf, JSON.stringify(p, null, 2));
+    const v = '$version';
+    const deps = { '@opencode-ai/plugin': v, '@opencode-ai/sdk': v };
+    fs.writeFileSync('$dir/package.json',
+      JSON.stringify({ name: 'opencode-config', version: '1.0.0', dependencies: deps }, null, 2));
+    fs.writeFileSync('$dir/package-lock.json', JSON.stringify({
+      name: 'opencode-config', version: '1.0.0', lockfileVersion: 3, requires: true,
+      packages: { '': { name: 'opencode-config', version: '1.0.0', dependencies: deps } },
+    }, null, 2));
   "
 }
 
+# write a minimal node_modules/<scope>/<name>/ shim from a single bundle file.
+# extra is a JSON fragment appended to the package.json (e.g. an exports map).
+shim_pkg() {
+  local dir="$1" scope="$2" name="$3" src="$4" version="$5" extra="${6:-}"
+  local out="$dir/node_modules/$scope/$name"
+  mkdir -p "$out"
+  cp -L "$src" "$out/index.js"
+  printf '{"name":"%s/%s","version":"%s","type":"module","main":"index.js"%s}\n' \
+    "$scope" "$name" "$version" "$extra" > "$out/package.json"
+}
+
+# populate ~/.config/opencode and ~/.opencode with the @opencode-ai shims and
+# the synthetic manifest. plugins themselves load TS-natively from their own
+# node_modules/<plugin>/src/index.ts via bun's runtime.
 seed_plugins() {
   local version
   version=$(opencode --version)
-  seed_plugin ~/.config/opencode "$version"
-  seed_plugin ~/.opencode "$version"
+  for dir in "${OPENCODE_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    mkdir -p "$dir/node_modules"
+    shim_pkg "$dir" @opencode-ai plugin "$PLUGIN_BUNDLE" "$version"
+    shim_pkg "$dir" @opencode-ai sdk    "$SDK_BUNDLE"    "$version" \
+      ',"exports":{"./client":"./index.js"}'
+    write_manifest "$dir" "$version"
+  done
 }
 
-# strip @opencode-ai/plugin from package.json so npm install doesn't try to fetch it
-strip_plugin_dep() {
-  for dir in ~/.config/opencode ~/.opencode; do
-    [[ -f "$dir/package.json" ]] && node -e "
-      const fs = require('fs');
-      const f = '$dir/package.json';
-      const p = JSON.parse(fs.readFileSync(f));
-      delete (p.dependencies || {})['@opencode-ai/plugin'];
-      fs.writeFileSync(f, JSON.stringify(p, null, 2));
-    "
+# place a plugin source tree (with TS source) into every opencode dir.
+# bun loads the .ts files at runtime; no compilation needed.
+place_plugin() {
+  local src="$1" name="$2"
+  for dir in "${OPENCODE_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    mkdir -p "$dir/node_modules"
+    rm -rf "$dir/node_modules/$name"
+    cp -rL "$src" "$dir/node_modules/$name"
   done
 }
 
 install_opencode() {
-  #nix --extra-experimental-features nix-command --extra-experimental-features flakes profile add github:khimaros/opencode
-  #npm -g install "opencode-ai@v1.2.26"
-  #npm -g install "opencode-ai@latest"
-  OPENCODE_NEEDS_BUILD=false
   if [[ ! -d "opencode" ]]; then
     git clone --recurse-submodules -b dev https://github.com/khimaros/opencode
-    OPENCODE_NEEDS_BUILD=true
   fi
   pushd opencode
   git fetch origin
-  OLD_HEAD=$(git rev-parse HEAD)
   git reset --hard origin/dev
-  NEW_HEAD=$(git rev-parse HEAD)
-  if [[ "$OLD_HEAD" != "$NEW_HEAD" ]]; then
-    OPENCODE_NEEDS_BUILD=true
-  fi
-  if [[ "$OPENCODE_NEEDS_BUILD" == "true" ]]; then
-    build_opencode
-  fi
+  build_opencode
   popd
 }
 
-# DEV: assume ~/opencode was pushed via rsync, always rebuild
 install_opencode_dev() {
   pushd ~/opencode
   build_opencode
@@ -86,40 +87,51 @@ install_opencode_dev() {
 build_opencode() {
   npm -g install bun
   bun install
-  # DEV rsync omits .git; the build script needs a channel name and falls
-  # back to `git branch --show-current` if OPENCODE_CHANNEL is unset.
   OPENCODE_CHANNEL=dev ./packages/opencode/script/build.ts --single
   systemctl --user stop opencode.service || true
   cp ./packages/opencode/dist/opencode-linux-x64/bin/opencode ~/.local/bin/
+
+  # bundle @opencode-ai/plugin and @opencode-ai/sdk client into single .js
+  # files so plugins can `import { tool } from "@opencode-ai/plugin"` without
+  # us having to copy and patch the upstream source tree (which uses
+  # `./tool.js`-style imports that bun's runtime won't rewrite).
+  bun build packages/plugin/src/index.ts \
+    --outfile packages/plugin/dist/index.js \
+    --target node --format esm
+  bun build packages/sdk/js/src/client.ts \
+    --outfile packages/sdk/js/dist/client.js \
+    --target node --format esm
 }
 
 install_plugins() {
-  strip_plugin_dep
-  pushd ~/.config/opencode
-  #npm install -U --legacy-peer-deps github:khimaros/opencode-evolve github:khimaros/opencode-bridge
-  npm install -U github:khimaros/opencode-evolve github:khimaros/opencode-bridge
-  popd
+  local tmp; tmp=$(mktemp -d)
+  for name in "${PLUGIN_NAMES[@]}"; do
+    git clone --depth=1 https://github.com/khimaros/"$name" "$tmp/$name"
+    place_plugin "$tmp/$name" "$name"
+  done
+  rm -rf "$tmp"
   seed_plugins
 }
 
-# DEV: install from tarballs pushed to /tmp/
 install_plugins_dev() {
-  strip_plugin_dep
-  pushd ~/.config/opencode
-  npm install /tmp/opencode-evolve-*.tgz /tmp/opencode-bridge-*.tgz
-  popd
-  rm -f /tmp/opencode-evolve-*.tgz /tmp/opencode-bridge-*.tgz
+  local tmp; tmp=$(mktemp -d)
+  for name in "${PLUGIN_NAMES[@]}"; do
+    local tgz
+    tgz=$(ls /tmp/"$name"-*.tgz 2>/dev/null | head -1) || true
+    [[ -n "$tgz" && -f "$tgz" ]] || continue
+    rm -rf "$tmp/extract" && mkdir -p "$tmp/extract"
+    tar -xzf "$tgz" -C "$tmp/extract"
+    place_plugin "$tmp/extract/package" "$name"
+  done
+  rm -rf "$tmp" /tmp/opencode-evolve-*.tgz /tmp/opencode-bridge-*.tgz
   seed_plugins
 }
 
 install_browser_use() {
-  #cargo install --locked uv
   which uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-  #uv tool install -U browser-use[cli]
   uv tool install --force -U git+https://github.com/khimaros/browser-use[cli]
 }
 
-# DEV: install from ~/browser-use pushed via rsync
 install_browser_use_dev() {
   which uv &>/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
   uv tool install --force -U ~/browser-use[cli]
@@ -146,28 +158,16 @@ main() {
   # initialize git repo: required to avoid "global" project in "/"
   pushd ~/workspace/
   [[ -d .git ]] || git init
-  #git add .
-  #git commit -m 'initial import'
   popd
 
   systemctl --user daemon-reload
-
   systemctl --user enable opencode.service
-
-  # FIXME: browser-use sometimes produces zombies that hang opencode shutdown
-  # presumably only if session is started by opencode bash?
-  #pgrep -f browser-use && pkill -9 -f browser-use
-
   systemctl --user restart opencode.service
-
-  # remove "global" project in "/" from project list
-  #sqlite3 ~/.local/state/opencode/opencode.db 'DELETE FROM project WHERE id = "global";'
 
   # remove this script
   rm -f "$0"
 }
 
-# allow sourcing for individual functions (eg. seed_plugins)
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main "$@"
 fi

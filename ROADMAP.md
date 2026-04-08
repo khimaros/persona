@@ -1,6 +1,7 @@
 # ROADMAP
 
 ```
+[ ] fix breakage and simplify incant-user.sh plugin installation
 [ ] create tools for editing agents/per.md frontmatter
     [ ] permission_add("bash", "cat /etc/*", "ask")
     [ ] permission_remove("bash", "cat /etc/*", "ask")
