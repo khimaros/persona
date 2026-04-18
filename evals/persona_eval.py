@@ -55,18 +55,24 @@ def api(method, path, body=None, expect_empty=False):
         return json.loads(raw)
 
 def wait_idle(session_id):
-    """poll session status until busy then idle, or timeout."""
+    """poll session status until busy then idle, or timeout.
+
+    returns (ok, error) where error is the last error status seen, if any.
+    """
     deadline = time.time() + POLL_TIMEOUT
     saw_busy = False
+    last_error = None
     while time.time() < deadline:
         statuses = api("GET", "/session/status")
         status = statuses.get(session_id, {})
         if status and status.get("type") != "idle":
             saw_busy = True
+        if status and status.get("type") == "error":
+            last_error = status
         if saw_busy and (not status or status.get("type") == "idle"):
-            return True
+            return True, last_error
         time.sleep(POLL_INTERVAL)
-    return False
+    return False, last_error
 
 # --- response parsing ---
 
@@ -330,13 +336,19 @@ def send_prompt(session_id, state, text):
     msgs = api("GET", f"/session/{session_id}/message")
     state.msg_count = len(msgs)
     api("POST", f"/session/{session_id}/prompt_async", body, expect_empty=True)
-    assert wait_idle(session_id), "timed out waiting for LLM response"
+    ok, error = wait_idle(session_id)
+    assert ok, "timed out waiting for LLM response"
+    if error:
+        cause = error.get("error", error)
+        pytest.fail(f"server error: {json.dumps(cause, ensure_ascii=False)}")
     msgs = api("GET", f"/session/{session_id}/message")
     new_msgs = msgs[state.msg_count:]
     parts = []
     for msg in new_msgs:
         if msg.get("info", {}).get("role") == "assistant":
             parts.extend(msg.get("parts", []))
+    if not parts:
+        pytest.fail("server returned no assistant response (possible silent error)")
     return Response({"parts": parts})
 
 # === eval tests ===
@@ -394,10 +406,27 @@ class TestTraitLifecycle:
         ])
         assert_text(r, "updated by eval harness")
 
-    def test_06_delete(self, session_id, state):
-        r = send_prompt(session_id, state, f"delete the {TEST_TRAIT} trait")
+    def test_06_move(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"rename the trait {TEST_TRAIT} to {TEST_TRAIT_RENAME}")
         assert_calls(r, [
-            {"tool": "persona_trait_delete", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+            {"tool": "persona_trait_move", "args": {"old_trait": TEST_TRAIT, "new_trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
+        ], also=[
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
+        ])
+
+    def test_07_read_after_move(self, session_id, state):
+        r = send_prompt(session_id, state,
+            f"read {TEST_TRAIT_RENAME} and quote its full content verbatim.")
+        assert_calls(r, [
+            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
+        ])
+        assert_text(r, "updated by eval harness")
+
+    def test_08_delete(self, session_id, state):
+        r = send_prompt(session_id, state, f"delete the {TEST_TRAIT_RENAME} trait")
+        assert_calls(r, [
+            {"tool": "persona_trait_delete", "args": {"trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
         ])
 
 # --- task tools: create, query, filter, count, delete ---
@@ -458,7 +487,7 @@ class TestTaskLifecycle:
         r = send_prompt(session_id, state,
             f"delete the '{TEST_TASK_SUMMARY}' task from .tasks.json by its id")
         assert_calls(r, [
-            C("persona_data_delete", args={"trait": ".tasks.json"}),
+            C("persona_data_update", args={"trait": ".tasks.json"}),
         ], also=[
             C("persona_data_query", args={"trait": ".tasks.json"}),
         ])
@@ -467,12 +496,11 @@ class TestTaskLifecycle:
         r = send_prompt(session_id, state,
             "delete all remaining tasks from .tasks.json")
         assert_calls(r, [
-            C("persona_data_delete", args={"trait": ".tasks.json"})
-            | C("persona_trait_delete", args={"trait": ".tasks.json"}, output={"success": True})
-            | C("persona_data_update", args={"trait": ".tasks.json", "value": {}}),
+            C("persona_data_update", args={"trait": ".tasks.json"})
+            | C("persona_trait_delete", args={"trait": ".tasks.json"}, output={"success": True}),
         ], also=[
             C("persona_data_query", args={"trait": ".tasks.json"}),
-            C("persona_data_delete", args={"trait": ".tasks.json"}),
+            C("persona_data_update", args={"trait": ".tasks.json"}),
             C("persona_data_count", args={"trait": ".tasks.json"}),
         ])
 
@@ -481,7 +509,7 @@ class TestTaskLifecycle:
 class TestRecurringTask:
     def test_01_create(self, session_id, state):
         r = send_prompt(session_id, state,
-            f"create a recurring task: {TEST_RECURRING_SUMMARY}. due {TEST_RECURRING_DUE}, repeats every {TEST_RECURRING_INTERVAL}. tell me the task id.")
+            f"create a recurring task: {TEST_RECURRING_SUMMARY}. due {TEST_RECURRING_DUE}, repeats every {TEST_RECURRING_INTERVAL}. do not start work yet. tell me the task id.")
         assert_calls(r, [
             {"tool": "persona_task_create", "args": {"title": TEST_RECURRING_SUMMARY, "due": TEST_RECURRING_DUE, "interval": TEST_RECURRING_INTERVAL}, "output": {"success": True}},
         ])
@@ -514,50 +542,22 @@ class TestRecurringTask:
         r = send_prompt(session_id, state,
             "find the task containing 'poem' and delete it from .tasks.json")
         assert_calls(r, [
-            {"tool": "persona_data_delete", "args": {"trait": ".tasks.json"}},
+            {"tool": "persona_data_update", "args": {"trait": ".tasks.json"}},
         ], also=[
             {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
         ])
-
-# --- trait_move ---
-
-class TestTraitMove:
-    def test_01_create(self, session_id, state):
-        r = send_prompt(session_id, state,
-            f"create a trait called {TEST_TRAIT} with content: 'temporary trait for rename test'")
-        assert_calls(r, [
-            {"tool": "persona_trait_write", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
-        ], also=[
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
-        ])
-
-    def test_02_move(self, session_id, state):
-        r = send_prompt(session_id, state,
-            f"rename the trait {TEST_TRAIT} to {TEST_TRAIT_RENAME}")
-        assert_calls(r, [
-            {"tool": "persona_trait_move", "args": {"old_trait": TEST_TRAIT, "new_trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
-        ], also=[
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
-        ])
-
-    def test_03_verify_and_cleanup(self, session_id, state):
-        r = send_prompt(session_id, state,
-            f"read {TEST_TRAIT_RENAME} and quote its content, then delete it")
-        assert_calls(r, [
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
-            {"tool": "persona_trait_delete", "args": {"trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
-        ])
-        assert_text(r, "rename test")
 
 # --- structured data tools: update, append, query, delete ---
 
 class TestDataLifecycle:
     def test_01_update_create(self, session_id, state):
-        """create a .json trait by setting a value with data_update."""
+        """create a .json trait by setting a field via $set."""
         r = send_prompt(session_id, state,
             f"set the value of 'color' to 'blue' in the {TEST_DATA_TRAIT} trait")
         assert_calls(r, [
-            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "color", "value": "blue"}, "output": {"success": True}},
+            {"tool": "persona_data_update",
+             "args": {"trait": TEST_DATA_TRAIT, "ops": {"$set": {"color": "blue"}}},
+             "output": {"success": True}},
         ], also=[
             {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
         ])
@@ -566,7 +566,9 @@ class TestDataLifecycle:
         r = send_prompt(session_id, state,
             f"also set 'size' to the string 'large' in {TEST_DATA_TRAIT}")
         assert_calls(r, [
-            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "size", "value": "large"}, "output": {"success": True}},
+            {"tool": "persona_data_update",
+             "args": {"trait": TEST_DATA_TRAIT, "ops": {"$set": {"size": "large"}}},
+             "output": {"success": True}},
         ], also=[
             {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
         ])
@@ -581,16 +583,18 @@ class TestDataLifecycle:
         assert_text(r, "large")
 
     def test_04_append_to_array(self, session_id, state):
-        """create an array field and append to it with data_append."""
+        """append 'eval' to a tags array via $push (auto-creates the array)."""
         r = send_prompt(session_id, state,
-            f"set 'tags' to an empty array in {TEST_DATA_TRAIT}, then append 'eval' to it")
+            f"append 'eval' to the 'tags' array in {TEST_DATA_TRAIT}")
         assert_calls(r, [
-            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT, "key": "tags", "value": []}, "output": {"success": True}},
-            C("persona_data_append", args={"trait": TEST_DATA_TRAIT, "key": "tags", "value": "eval"}, output={"success": True})
-            | C("persona_data_append", args={"trait": TEST_DATA_TRAIT, "key": "tags", "value": ["eval"]}, output={"success": True}),
+            C("persona_data_update",
+              args={"trait": TEST_DATA_TRAIT, "ops": {"$push": {"tags": "eval"}}},
+              output={"success": True})
+            | C("persona_data_update",
+                args={"trait": TEST_DATA_TRAIT, "ops": {"$push": {"tags": {"$each": ["eval"]}}}},
+                output={"success": True}),
         ], also=[
             {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
-            C("persona_data_append", args={"trait": TEST_DATA_TRAIT, "key": "tags"}),
         ])
 
     def test_05_verify_append(self, session_id, state):
@@ -608,6 +612,7 @@ class TestDataLifecycle:
             {"tool": "persona_trait_delete", "args": {"trait": TEST_DATA_TRAIT}, "output": {"success": True}},
         ], also=[
             {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT}},
             {"tool": "persona_record_query"},
         ])
 
@@ -625,7 +630,7 @@ class TestJournalLifecycle:
 
     def test_02_query_finds_entry(self, session_id, state):
         r = send_prompt(session_id, state,
-            "search my journal for entries about sky. quote the matching content.")
+            "search my journal for all entries about sky — there may be older ones i've forgotten. quote each matching entry.")
         assert_calls(r, [
             {"tool": "persona_record_query", "args": {"trait": ".journal.jsonl"}},
         ])
@@ -642,7 +647,7 @@ class TestJournalLifecycle:
 
 class TestBrowserUse:
     def test_01_start_session(self, session_id, state):
-        r = send_prompt(session_id, state, "open a browser session")
+        r = send_prompt(session_id, state, "start a headless browser session now")
         assert_bash_sequence(r, [
             r"browser-head start",
         ])

@@ -5,9 +5,27 @@ import json, os, re, shutil, subprocess, sys, tempfile
 
 PASS = FAIL = 0
 
+PROMPT_CONTRACT = {
+    "preamble": "preamble.md", "chat": "chat.md", "heartbeat": "heartbeat.md",
+    "compaction": "compaction.md", "recover": "recover.md",
+}
+
+def load_prompts(workspace):
+    """mirror evolve plugin's loadPrompts() for hook tests."""
+    out = {}
+    for name, file in PROMPT_CONTRACT.items():
+        p = os.path.join(workspace, "prompts", file)
+        if os.path.exists(p):
+            out[name] = open(p).read()
+    return out
+
 def call_hook(hook_path, name, ctx=None):
-    """call a hook and return (merged_result, logs, exit_code)."""
-    input_data = json.dumps(ctx or {})
+    """call a hook and return (merged_result, logs, exit_code).
+    auto-injects ctx.prompts from workspace/prompts/ to mirror evolve."""
+    full = dict(ctx or {})
+    if "prompts" not in full:
+        full["prompts"] = load_prompts(os.path.dirname(os.path.dirname(hook_path)))
+    input_data = json.dumps(full)
     proc = subprocess.run(
         [hook_path, name], input=input_data, capture_output=True, text=True,
     )
@@ -79,16 +97,17 @@ try:
     names = [t["name"] for t in r["tools"]]
     for expected in ("trait_list", "trait_read", "trait_write", "trait_edit",
                      "trait_append", "trait_delete", "trait_move",
-                     "data_query", "data_update", "data_delete", "data_append", "data_count",
+                     "data_query", "data_update", "data_count",
                      "record_append", "record_query", "record_count",
                      "task_create", "task_update", "task_comment"):
         check(f"discover includes {expected}", expected in names, f"got: {names}")
     # removed tools must not appear
-    for removed in ("data_read", "data_list", "record_list", "record_fields",
+    for removed in ("data_read", "data_list", "data_delete", "data_append",
+                    "record_list", "record_fields",
                     "task_list", "task_read", "task_delete",
                     "journal_append", "journal_list", "journal_count"):
         check(f"discover excludes {removed}", removed not in names, f"got: {names}")
-    check("discover returns exactly 18 tools", len(r["tools"]) == 18, f"got: {len(r['tools'])}")
+    check("discover returns exactly 16 tools", len(r["tools"]) == 16, f"got: {len(r['tools'])}")
     check("discover logs tool names", any("tools:" in l for l in logs))
 
     # --- discover tool parameter schemas ---
@@ -220,7 +239,7 @@ try:
     # --- compacting ---
 
     r, logs, _ = call_hook(hook, "compacting")
-    check("compacting returns prompt key", has_key(r, "prompt"))
+    check("compacting defers to evolve default", not has_key(r, "prompt"), f"got: {r}")
     check("compacting logs core traits", any("core:" in l for l in logs))
 
     # --- trait_list ---
@@ -327,6 +346,7 @@ try:
     check("trait_edit returns result key", has_key(r, "result"))
     parsed = result_json(r)
     check("trait_edit returns success json", parsed.get("success") is True, f"got: {parsed}")
+    check("trait_edit reports replacements count", parsed.get("replacements") == 1, f"got: {parsed}")
     check("trait_edit reports modified", has_key(r, "modified"))
     content = open(os.path.join(tmp, "traits", "PATCH.md")).read()
     check("trait_edit updated file", content == "new text here")
@@ -340,6 +360,10 @@ try:
     parsed = result_json(r)
     check("trait_edit multiple matches returns error", "error" in parsed, f"got: {parsed}")
 
+    r, _, _ = call_tool(hook, "trait_edit", {"trait": "DUP.md", "oldString": "a", "newString": "b", "replaceAll": "true"})
+    parsed = result_json(r)
+    check("trait_edit replaceAll reports replacements count", parsed.get("replacements") == 3, f"got: {parsed}")
+
     # --- trait_append ---
 
     open(os.path.join(tmp, "traits", "APPEND.md"), "w").write("line one")
@@ -348,6 +372,7 @@ try:
     check("trait_append returns result key", has_key(r, "result"))
     parsed = result_json(r)
     check("trait_append returns success json", parsed.get("success") is True, f"got: {parsed}")
+    check("trait_append echoes appended content", parsed.get("appended") == "line two", f"got: {parsed}")
     check("trait_append reports modified", r.get("modified") == ["APPEND.md"])
     content = open(os.path.join(tmp, "traits", "APPEND.md")).read()
     check("trait_append appended content", content == "line one\nline two")
@@ -558,7 +583,7 @@ try:
     check("heartbeat with history returns system", has_key(r, "system"))
 
     r, _, _ = call_hook(hook, "compacting", {"history": sample_history})
-    check("compacting with history returns prompt", has_key(r, "prompt"))
+    check("compacting with history defers to default", not has_key(r, "prompt"))
 
     r, _, _ = call_hook(hook, "recover", {"failed_hook": "test", "error": "x", "history": sample_history})
     check("recover with history returns system", has_key(r, "system"))
@@ -634,7 +659,7 @@ try:
     open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"a": 1, "b": {"c": [10, 20, 30]}}')
 
     # basic read: returns full dict
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".test.json"})
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".test.json", "key": "."})
     parsed = result_json(r)
     check("data_query returns full object", parsed == {"a": 1, "b": {"c": [10, 20, 30]}},
           f"got: {parsed}")
@@ -653,11 +678,11 @@ try:
     check("data_query array index", parsed == 20, f"got: {parsed}")
 
     # error cases
-    r, _, _ = call_tool(hook, "data_query", {"trait": "noext"})
+    r, _, _ = call_tool(hook, "data_query", {"trait": "noext", "key": "."})
     parsed = result_json(r)
     check("data_query rejects non-.json", "error" in parsed, f"got: {parsed}")
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".missing.json"})
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".missing.json", "key": "."})
     parsed = result_json(r)
     check("data_query missing file", "error" in parsed, f"got: {parsed}")
 
@@ -670,7 +695,7 @@ try:
     }))
 
     # no filter: returns full dict
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json"})
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": "."})
     parsed = result_json(r)
     check("data_query dict returns all keys", set(parsed.keys()) == {"id1", "id2", "id3"},
           f"got: {list(parsed.keys())}")
@@ -678,7 +703,7 @@ try:
 
     # --- data_query MongoDB-style filter: exact match ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"status": "open"}})
     parsed = result_json(r)
     check("data_query filter exact match", set(parsed.keys()) == {"id1", "id3"},
@@ -686,7 +711,7 @@ try:
 
     # --- data_query MongoDB-style filter: $in ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"status": {"$in": ["open", "done"]}}})
     parsed = result_json(r)
     check("data_query filter $in", set(parsed.keys()) == {"id1", "id2", "id3"},
@@ -694,40 +719,40 @@ try:
 
     # --- data_query MongoDB-style filter: id matching via $in ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"id": {"$in": ["id1", "id3"]}}})
     parsed = result_json(r)
     check("data_query filter id $in", set(parsed.keys()) == {"id1", "id3"},
           f"got: {list(parsed.keys())}")
 
     # single id match
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"id": "id2"}})
     parsed = result_json(r)
     check("data_query filter id exact", set(parsed.keys()) == {"id2"},
           f"got: {list(parsed.keys())}")
 
     # missing id returns empty dict
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"id": "missing"}})
     parsed = result_json(r)
     check("data_query filter id missing", parsed == {}, f"got: {parsed}")
 
     # --- data_query MongoDB-style filter: $lt, $gt, $lte, $gte ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"due": {"$lt": "2026-04-15T00:00:00.000+00:00"}}})
     parsed = result_json(r)
     check("data_query filter $lt", set(parsed.keys()) == {"id1"},
           f"got: {list(parsed.keys())}")
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"due": {"$gte": "2026-05-01T00:00:00.000+00:00"}}})
     parsed = result_json(r)
     check("data_query filter $gte", set(parsed.keys()) == {"id2"},
           f"got: {list(parsed.keys())}")
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"due": {"$gt": "2026-04-01T00:00:00.000+00:00",
                                                                   "$lte": "2026-05-01T00:00:00.000+00:00"}}})
     parsed = result_json(r)
@@ -736,7 +761,7 @@ try:
 
     # --- data_query MongoDB-style filter: $eq ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"status": {"$eq": "open"}}})
     parsed = result_json(r)
     check("data_query filter $eq", set(parsed.keys()) == {"id1", "id3"},
@@ -744,7 +769,7 @@ try:
 
     # --- data_query MongoDB-style filter: $regex ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"title": {"$regex": "^a"}}})
     parsed = result_json(r)
     check("data_query filter $regex", set(parsed.keys()) == {"id1"},
@@ -752,7 +777,7 @@ try:
 
     # --- data_query MongoDB-style filter: $regex with $options ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"title": {"$regex": "^A", "$options": "i"}}})
     parsed = result_json(r)
     check("data_query filter $regex + $options i", set(parsed.keys()) == {"id1"},
@@ -760,7 +785,7 @@ try:
 
     # --- data_query MongoDB-style filter: $not ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"status": {"$not": "done"}}})
     parsed = result_json(r)
     check("data_query filter $not", set(parsed.keys()) == {"id1", "id3"},
@@ -768,7 +793,7 @@ try:
 
     # --- data_query MongoDB-style filter: $ne (alias for $not) ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"status": {"$ne": "done"}}})
     parsed = result_json(r)
     check("data_query filter $ne", set(parsed.keys()) == {"id1", "id3"},
@@ -776,7 +801,7 @@ try:
 
     # --- data_query MongoDB-style filter: $nin ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"status": {"$nin": ["done", "error"]}}})
     parsed = result_json(r)
     check("data_query filter $nin", set(parsed.keys()) == {"id1", "id3"},
@@ -784,7 +809,7 @@ try:
 
     # --- data_query MongoDB-style filter: $or (top-level) ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"$or": [
                                                   {"status": "done"},
                                                   {"owner": "tom"}
@@ -796,7 +821,7 @@ try:
     # --- data_query filter on entries missing the filtered field ---
     # entries without the filtered field should not match
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"owner": "tom"}})
     parsed = result_json(r)
     check("data_query filter skips entries without field", set(parsed.keys()) == {"id3"},
@@ -804,7 +829,7 @@ try:
 
     # --- data_query with fields param (array type) ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "fields": ["title", "status"]})
     parsed = result_json(r)
     check("data_query fields projection keys", set(parsed.keys()) == {"id1", "id2", "id3"})
@@ -814,17 +839,17 @@ try:
 
     # --- data_query with limit and offset ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "limit": "1"})
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".", "limit": "1"})
     parsed = result_json(r)
     check("data_query limit", len(parsed) == 1, f"got: {len(parsed)}")
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "limit": "1", "offset": "1"})
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".", "limit": "1", "offset": "1"})
     parsed = result_json(r)
     check("data_query offset", len(parsed) == 1, f"got: {len(parsed)}")
 
     # --- data_query filter + fields combined ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"status": "open"},
                                               "fields": ["title"]})
     parsed = result_json(r)
@@ -834,14 +859,14 @@ try:
 
     # --- data_query bad regex in $regex ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": {"title": {"$regex": "[invalid"}}})
     parsed = result_json(r)
     check("data_query bad $regex returns error", "error" in parsed, f"got: {parsed}")
 
     # --- data_query string-coerced filter (LLM sends string instead of object) ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": '{"status": "open"}'})
     parsed = result_json(r)
     check("data_query coerced string filter", set(parsed.keys()) == {"id1", "id3"},
@@ -849,7 +874,7 @@ try:
 
     # --- data_query mangled quote tokens in filter ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": '{<|"|>status<|"|>: <|"|>open<|"|>}'})
     parsed = result_json(r)
     check("data_query mangled quote filter", set(parsed.keys()) == {"id1", "id3"},
@@ -857,7 +882,7 @@ try:
 
     # --- data_query mangled filter with unquoted keys and wrong brackets ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": '{status: <|"|>open<|"|>}'})
     parsed = result_json(r)
     check("data_query unquoted keys filter", set(parsed.keys()) == {"id1", "id3"},
@@ -865,7 +890,7 @@ try:
 
     # --- data_query mangled filter with ]] instead of }} ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": '{due:{$lt:<|"|>2026-04-15T00:00:00.000+00:00<|"|>]}'})
     parsed = result_json(r)
     check("data_query bracket mismatch filter", set(parsed.keys()) == {"id1"},
@@ -873,7 +898,7 @@ try:
 
     # --- data_query unparseable filter returns error ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
                                               "filter": "not json at all"})
     parsed = result_json(r)
     check("data_query unparseable filter error", "error" in parsed, f"got: {parsed}")
@@ -881,127 +906,163 @@ try:
     os.remove(os.path.join(tmp, "traits", ".dl.json"))
     os.remove(os.path.join(tmp, "traits", ".test.json"))
 
-    # --- data_update ---
+    # --- data_update: $set ---
 
     open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"a": 1, "b": {"c": [10, 20, 30]}}')
 
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "a", "value": 42})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"a": 42}}})
     parsed = result_json(r)
-    check("data_update returns success", parsed.get("success") is True, f"got: {parsed}")
+    check("data_update $set returns success", parsed.get("success") is True, f"got: {parsed}")
+    check("data_update reports modified_paths", parsed.get("modified_paths") == ["a"], f"got: {parsed}")
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update value correct", data["a"] == 42)
+    check("data_update $set value correct", data["a"] == 42)
 
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "b.c.0", "value": 99})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update nested array index", data["b"]["c"][0] == 99)
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "new_key", "value": "hello"})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update creates new key in dict", data.get("new_key") == "hello")
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "x.y.z", "value": 1})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
+        "ops": {"$set": {"m": 1, "n": 2}, "$unset": {"a": ""}}})
     parsed = result_json(r)
-    check("data_update unreachable key returns error", "error" in parsed, f"got: {parsed}")
+    check("data_update multi-op modified_paths lists all", sorted(parsed.get("modified_paths", [])) == ["a", "m", "n"],
+          f"got: {parsed}")
 
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "value": {"fresh": True}})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"b.c.0": 99}}})
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update overwrite whole file", data == {"fresh": True})
+    check("data_update $set nested array index", data["b"]["c"][0] == 99)
 
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": "", "value": {"a": 1}})
-    check("data_update returns modified", has_key(r, "modified"))
-    check("data_update returns notify", has_key(r, "notify"))
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"new_key": "hello"}}})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update $set creates new key in dict", data.get("new_key") == "hello")
 
-    # auto-create non-existent trait
+    # $set auto-creates intermediate dicts
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"x.y.z": 1}}})
+    parsed = result_json(r)
+    check("data_update $set autocreates nested path", parsed.get("success") is True, f"got: {parsed}")
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update $set nested path value", data["x"]["y"]["z"] == 1)
+
+    # $set at root is rejected (use trait_write to replace whole file)
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {".": {"fresh": True}}}})
+    parsed = result_json(r)
+    check("data_update $set root rejected", "error" in parsed, f"got: {parsed}")
+    check("data_update $set root suggests trait_write",
+          "persona_trait_write" in parsed.get("error", ""), f"got: {parsed}")
+
+    # $set multiple fields at once
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
+                                              "ops": {"$set": {"color": "blue", "size": "large"}}})
+    check("data_update $set returns modified", has_key(r, "modified"))
+    check("data_update $set returns notify", has_key(r, "notify"))
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update $set batch", data.get("color") == "blue" and data.get("size") == "large")
+
+    # ops must be non-empty object
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {}})
+    parsed = result_json(r)
+    check("data_update empty ops returns error", "error" in parsed, f"got: {parsed}")
+
+    # unknown operator returns error
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$bogus": {"a": 1}}})
+    parsed = result_json(r)
+    check("data_update unknown op returns error", "error" in parsed, f"got: {parsed}")
+
+    # auto-create non-existent trait via $set
     new_trait = ".autocreated.json"
     new_path = os.path.join(tmp, "traits", new_trait)
     assert not os.path.exists(new_path), "precondition: trait should not exist yet"
 
-    r, _, _ = call_tool(hook, "data_update", {"trait": new_trait, "key": "foo", "value": "bar"})
+    r, _, _ = call_tool(hook, "data_update", {"trait": new_trait, "ops": {"$set": {"foo": "bar"}}})
     parsed = result_json(r)
     check("data_update auto-creates trait", parsed.get("success") is True)
     data = json.loads(open(new_path).read())
     check("data_update auto-created content", data == {"foo": "bar"})
 
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".autocreated2.json", "value": [1, 2, 3]})
-    data = json.loads(open(os.path.join(tmp, "traits", ".autocreated2.json")).read())
-    check("data_update auto-creates with whole-file overwrite", data == [1, 2, 3])
-
-    # --- data_delete ---
+    # --- data_update: $unset ---
 
     open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"x": 1, "y": 2, "arr": [10, 20, 30]}')
 
-    r, _, _ = call_tool(hook, "data_delete", {"trait": ".test.json", "key": "x"})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {"x": ""}}})
     parsed = result_json(r)
-    check("data_delete returns success", parsed.get("success") is True, f"got: {parsed}")
+    check("data_update $unset returns success", parsed.get("success") is True, f"got: {parsed}")
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_delete key gone", "x" not in data)
-    check("data_delete other keys intact", data.get("y") == 2)
+    check("data_update $unset key gone", "x" not in data)
+    check("data_update $unset other keys intact", data.get("y") == 2)
 
-    r, _, _ = call_tool(hook, "data_delete", {"trait": ".test.json", "key": "arr.1"})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {"arr.1": ""}}})
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_delete array index", data["arr"] == [10, 30])
+    check("data_update $unset array index", data["arr"] == [10, 30])
 
-    r, _, _ = call_tool(hook, "data_delete", {"trait": ".test.json", "key": "nonexistent"})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {"nonexistent": ""}}})
     parsed = result_json(r)
-    check("data_delete missing key returns error", "error" in parsed, f"got: {parsed}")
+    check("data_update $unset missing key returns error", "error" in parsed, f"got: {parsed}")
 
-    # --- data_append ---
+    # $unset at root is rejected (use trait_delete to remove the whole file)
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {".": ""}}})
+    parsed = result_json(r)
+    check("data_update $unset root returns error", "error" in parsed, f"got: {parsed}")
+    check("data_update $unset root suggests trait_delete",
+          "persona_trait_delete" in parsed.get("error", ""), f"got: {parsed}")
+
+    # --- data_update: $push ---
 
     open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"items": [1, 2]}')
 
-    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "key": "items", "value": 3})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {"items": 3}}})
     parsed = result_json(r)
-    check("data_append returns success", parsed.get("success") is True, f"got: {parsed}")
+    check("data_update $push returns success", parsed.get("success") is True, f"got: {parsed}")
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_append value correct", data["items"] == [1, 2, 3])
+    check("data_update $push scalar", data["items"] == [1, 2, 3])
 
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('[1, 2]')
-    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "value": 3})
+    # $push with $each extends
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
+                                              "ops": {"$push": {"items": {"$each": [4, 5]}}}})
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_append to root array", data == [1, 2, 3])
+    check("data_update $push $each", data["items"] == [1, 2, 3, 4, 5])
 
-    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "key": "notarray", "value": 1})
+    # $push with list value (no $each) appends the whole list as one element
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
+                                              "ops": {"$push": {"items": [9, 9]}}})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update $push list-as-single", data["items"] == [1, 2, 3, 4, 5, [9, 9]])
+
+    # $push to non-array returns error
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"notarray": 1}')
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {"notarray": 1}}})
     parsed = result_json(r)
-    check("data_append non-array returns error", "error" in parsed, f"got: {parsed}")
+    check("data_update $push non-array returns error", "error" in parsed, f"got: {parsed}")
 
-    # auto-create non-existent trait for data_append
-    new_trait = ".append_auto.json"
-    new_path = os.path.join(tmp, "traits", new_trait)
-    assert not os.path.exists(new_path), "precondition: trait should not exist yet"
+    # $push auto-creates array at missing path
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{}')
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {"tags": "first"}}})
+    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
+    check("data_update $push auto-creates array", data["tags"] == ["first"])
 
-    r, _, _ = call_tool(hook, "data_append", {"trait": new_trait, "value": "first"})
+    # $push at root is rejected
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {".": "first"}}})
     parsed = result_json(r)
-    check("data_append auto-creates trait", parsed.get("success") is True)
-    data = json.loads(open(new_path).read())
-    check("data_append auto-created as array", data == ["first"])
+    check("data_update $push root returns error", "error" in parsed, f"got: {parsed}")
 
-    os.remove(new_path)
     os.remove(os.path.join(tmp, "traits", ".test.json"))
 
-    # --- data_append: list value extends instead of nesting ---
+    # --- data_update: combined operators in one call ---
 
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"tags": ["a"]}')
-    r, _, _ = call_tool(hook, "data_append", {"trait": ".test.json", "key": "tags", "value": ["b", "c"]})
+    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"color": "red", "tags": ["a"], "old": "x"}')
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
+                                              "ops": {"$set": {"color": "blue"},
+                                                      "$push": {"tags": "b"},
+                                                      "$unset": {"old": ""}}})
     parsed = result_json(r)
-    check("data_append list extends array", parsed.get("success") is True, f"got: {parsed}")
+    check("data_update combined ops succeeds", parsed.get("success") is True, f"got: {parsed}")
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_append list value extended", data["tags"] == ["a", "b", "c"])
+    check("data_update combined result",
+          data == {"color": "blue", "tags": ["a", "b"]}, f"got: {data}")
     os.remove(os.path.join(tmp, "traits", ".test.json"))
 
-    # --- data_update: leading dot in key is stripped ---
+    # --- data_update: leading dot in path is stripped ---
 
     open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"color": "red"}')
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": ".color", "value": "blue"})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {".color": "blue"}}})
     parsed = result_json(r)
-    check("data_update leading dot key succeeds", parsed.get("success") is True, f"got: {parsed}")
+    check("data_update leading dot path succeeds", parsed.get("success") is True, f"got: {parsed}")
     data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update leading dot key correct", data["color"] == "blue")
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "key": ".size", "value": "large"})
-    parsed = result_json(r)
-    check("data_update leading dot new key succeeds", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update leading dot new key correct", data.get("size") == "large")
+    check("data_update leading dot path correct", data["color"] == "blue")
     os.remove(os.path.join(tmp, "traits", ".test.json"))
 
     # --- data_count ---
@@ -1091,6 +1152,10 @@ try:
     parsed = result_json(r)
     check("record_append succeeds", parsed.get("success") is True)
     check("record_append returns modified", has_key(r, "modified"))
+    ts = parsed.get("timestamp", "")
+    check("record_append returns timestamp",
+          isinstance(ts, str) and len(ts) >= 20 and ts[4] == "-" and ts[10] == "T",
+          f"got: {parsed}")
 
     r, _, _ = call_tool(hook, "record_append", {"trait": ".test.jsonl", "fields": {"type": "obs", "content": "world"}})
     parsed = result_json(r)
@@ -1389,31 +1454,31 @@ try:
 
     # --- verify tasks via data_query (replaces task_read + task_list) ---
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
                                               "filter": {"id": desc_id}})
     parsed = result_json(r)
     check("data_query task by id", desc_id in parsed)
     check("data_query task has title", parsed[desc_id].get("title") == "described task")
     check("data_query task has description", parsed[desc_id].get("description") == "detailed info about this task")
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
                                               "filter": {"status": "open"}})
     parsed = result_json(r)
     check("data_query tasks filter status", len(parsed) >= 2)
 
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
                                               "filter": {"status": "blocked"}})
     parsed = result_json(r)
     check("data_query tasks filter blocked", len(parsed) == 1)
 
     # task_read via data_query with id filter for non-existent task
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
                                               "filter": {"id": "nonexistent-uuid"}})
     parsed = result_json(r)
     check("data_query missing task returns empty", parsed == {}, f"got: {parsed}")
 
     # task_list with fields via data_query
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json",
+    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
                                               "fields": ["title", "status"]})
     parsed = result_json(r)
     first_val = list(parsed.values())[0]
@@ -1422,8 +1487,7 @@ try:
     check("data_query tasks fields excludes created", "created" not in first_val)
 
     # clean up extra tasks for subsequent tests
-    call_tool(hook, "data_delete", {"trait": ".tasks.json", "key": desc_id})
-    call_tool(hook, "data_delete", {"trait": ".tasks.json", "key": no_desc_id})
+    call_tool(hook, "data_update", {"trait": ".tasks.json", "ops": {"$unset": {desc_id: "", no_desc_id: ""}}})
 
     # --- task_update ---
 
@@ -1478,17 +1542,17 @@ try:
     parsed = result_json(r)
     check("task_update rejects invalid interval", "error" in parsed, f"got: {parsed}")
 
-    # --- task deletion via data_delete (replaces task_delete) ---
+    # --- task deletion via data_update $unset (replaces task_delete) ---
 
-    r, _, _ = call_tool(hook, "data_delete", {"trait": ".tasks.json", "key": task_id})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".tasks.json", "ops": {"$unset": {task_id: ""}}})
     parsed = result_json(r)
-    check("data_delete task succeeds", parsed.get("success") is True)
+    check("data_update $unset task succeeds", parsed.get("success") is True)
     data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("data_delete task removed", task_id not in data)
+    check("data_update $unset task removed", task_id not in data)
 
-    r, _, _ = call_tool(hook, "data_delete", {"trait": ".tasks.json", "key": "nonexistent-uuid"})
+    r, _, _ = call_tool(hook, "data_update", {"trait": ".tasks.json", "ops": {"$unset": {"nonexistent-uuid": ""}}})
     parsed = result_json(r)
-    check("data_delete missing task returns error", "error" in parsed)
+    check("data_update $unset missing task returns error", "error" in parsed)
 
     # --- task_comment ---
 
@@ -1560,8 +1624,8 @@ try:
     check("task_comment recurring stays open", data[recur_comment_id]["status"] == "open")
 
     # cleanup
-    call_tool(hook, "data_delete", {"trait": ".tasks.json", "key": comment_task_id})
-    call_tool(hook, "data_delete", {"trait": ".tasks.json", "key": recur_comment_id})
+    call_tool(hook, "data_update", {"trait": ".tasks.json",
+                                    "ops": {"$unset": {comment_task_id: "", recur_comment_id: ""}}})
 
     os.remove(os.path.join(tmp, "traits", ".tasks.json"))
     if os.path.exists(comments_path):
@@ -1617,7 +1681,7 @@ try:
     names = sorted(t["name"] for t in r["tools"])
     expected_names = sorted([
         "trait_list", "trait_read", "trait_write", "trait_edit", "trait_append", "trait_delete", "trait_move",
-        "data_query", "data_update", "data_delete", "data_append", "data_count",
+        "data_query", "data_update", "data_count",
         "record_append", "record_query", "record_count",
         "task_create", "task_update", "task_comment",
     ])
@@ -1627,9 +1691,9 @@ try:
     # --- discover typed params ---
 
     tools_by_name = {t["name"]: t for t in r["tools"]}
-    value_param = tools_by_name["data_update"]["parameters"].get("value", {})
-    check("data_update value param is typed", isinstance(value_param, dict) and value_param.get("type") == "any",
-          f"got: {value_param}")
+    ops_param = tools_by_name["data_update"]["parameters"].get("ops", {})
+    check("data_update ops param is object-typed", isinstance(ops_param, dict) and ops_param.get("type") == "object",
+          f"got: {ops_param}")
 
     # --- datetime format consistency ---
     # all timestamps must use evolve_datetime canonical format: YYYY-MM-DDTHH:MM:SS.sss+HH:MM
@@ -1690,7 +1754,8 @@ try:
     # --- prompt size tracking ---
 
     from persona import system_prompt as sp_fn, tool_defs as td_fn
-    sp_text = "\n".join(sp_fn("chat"))
+    prompts = load_prompts(tmp)
+    sp_text = "\n".join(sp_fn(prompts, "chat"))
     td_text = json.dumps(td_fn())
     td_count = len(td_fn())
     print(f"\nprompt: {len(sp_text)} chars, tools: {len(td_text)} chars ({td_count}), total: {len(sp_text) + len(td_text)} chars")

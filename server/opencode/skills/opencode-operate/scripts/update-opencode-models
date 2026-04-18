@@ -106,7 +106,7 @@ def main():
             for cfg in providers.values()
         )
         if not exists:
-            name = "openai-compatible"
+            name = "custom"
             if name in providers:
                 i = 1
                 while f"{name}-{i}" in providers:
@@ -148,9 +148,9 @@ def main():
         base_url = "http://localhost:7860/v1"
         models_data = fetch_models(base_url)
         if models_data is not None:
-            providers["llama.cpp"] = {
+            providers["custom"] = {
                 "npm": "@ai-sdk/openai-compatible",
-                "name": "llama.cpp (local)",
+                "name": "custom",
                 "options": {"baseURL": base_url, "timeout": 14400000},
                 "models": process_models(models_data),
             }

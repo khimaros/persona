@@ -45,26 +45,29 @@ STOP and ask the user to respond to the captcha before continuing.
 | `tab close [index...]` | Close one or more tabs by index |
 
 ### Inspection
+`state` and `screenshot` inspect the whole page. `get <subcommand>` retrieves
+specific info — it is **not** a standalone command; you must pass a subcommand.
+`<index>` values come from running `state` first.
+
 | Command | Description |
 | :--- | :--- |
-| `state` | Get current URL, title, interactive elements with indices; JS dialogs auto-dismiss and appear here |
-| `screenshot [--full] <path>` | Take a screenshot (base64 if no path) |
-| `get title` | Get page title |
-| `get html` | Get full page HTML |
-| `get html --selector "css"` | Get HTML of matching element |
-| `get text <index>` | Get text content of element |
-| `get value <index>` | Get value of input/textarea |
-| `get attributes <index>` | Get all attributes of element |
-| `get bbox <index>` | Get bounding box (x, y, width, height) |
+| `state` | Page URL, title, and interactive elements with their indices. JS dialogs auto-dismiss and appear here. Run this before any `click`/`input`/`get` that needs an index |
+| `screenshot [path] [--full]` | Take a PNG screenshot. With `path`, writes the file and prints the path; without `path`, prints raw base64 (no `data:` prefix) to stdout. `--full` captures the entire scrollable page instead of just the viewport |
+| `get title` | Page `<title>` |
+| `get html [--selector "css"]` | Full page HTML, or HTML of the first element matching the CSS selector |
+| `get text <index>` | Visible text content of the element |
+| `get value <index>` | Current value of an `<input>`/`<textarea>`/`<select>` |
+| `get attributes <index>` | All HTML attributes of the element as a dict |
+| `get bbox <index>` | Bounding box `{x, y, width, height}` in CSS pixels |
 
 ### Interaction
 | Command | Description |
 | :--- | :--- |
-| `click <index>` | Click an element by its index |
+| `click <index>` \| `click <x> <y>` | Click by element index, or by viewport pixel coordinates when two integers are given |
 | `type <text>` | Type text into the currently focused element |
 | `input <index> <text>` | Type text into a specific element by index |
-| `keys <key>` | Send special keys (e.g., `Enter`, `Tab`) |
-| `scroll <amount>` | Scroll page (positive for down, negative for up) |
+| `keys <keys>` | Send a key or chord. Single keys (`Enter`, `Tab`, `Escape`, `ArrowDown`) or combos joined with `+` (`Control+a`, `Shift+Tab`, `Meta+k`) |
+| `scroll [up\|down] [--amount N]` | Scroll page. direction defaults to `down`; `--amount` is pixels (default 500) |
 | `select <index> <option>` | Select a dropdown option |
 | `hover <index>` | Hover over an element |
 | `dblclick <index>` | Double-click an element |
@@ -75,9 +78,8 @@ STOP and ask the user to respond to the captcha before continuing.
 | :--- | :--- |
 | `eval <js>` | Execute JavaScript in the browser |
 | `extract <query>` | Extract structured data from the page using LLM |
-| `wait selector "css"` | Wait for element to be visible |
-| `wait selector "css" --state hidden` | Wait for element to disappear |
-| `wait text "string"` | Wait until text appears on page |
+| `wait selector "css" [--state S] [--timeout MS]` | Wait for a selector. `--state` is `attached`, `detached`, `visible` (default), or `hidden`. `--timeout` in milliseconds (default 30000) |
+| `wait text "string" [--timeout MS]` | Wait until text appears on the page. `--timeout` in milliseconds (default 30000) |
 
 **Tip**: Use `tab new https://example.com` to open a link in a new tab.
 

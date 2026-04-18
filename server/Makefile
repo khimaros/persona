@@ -115,8 +115,12 @@ service-restart:
 	ssh $(USER_NAME)@$(ADDRESS) -- systemctl --user restart opencode.service
 .PHONY: service-restart
 
-ssh:
+screen:
 	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- screen -x -R -S control
+.PHONY: screen
+
+ssh:
+	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS)
 .PHONY: ssh
 
 browser-head:
@@ -136,7 +140,7 @@ webui:
 .PHONY: webui
 
 tui:
-	opencode attach http://$(ADDRESS):4096
+	ssh -t $(USER_NAME)@$(ADDRESS) -- $(USER_HOME)/.local/bin/opencode attach http://localhost:4096
 .PHONY: tui
 
 start:

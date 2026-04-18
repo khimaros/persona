@@ -6,10 +6,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, TypedDict, get_type_hints
 
-# workspace layout: traits/ for persona files, prompts/ for builtin templates
+# workspace layout: traits/ for persona files. prompts live under prompts/ but
+# are loaded by evolve and injected via ctx.prompts — hooks never read them.
 WORKSPACE = Path(__file__).resolve().parent.parent
 TRAITS = WORKSPACE / "traits"
-PROMPTS = WORKSPACE / "prompts"
 AVATAR = "🌀"
 ISO_DT_DESC = "ISO 8601 datetime with timezone offset (e.g. 2026-04-01T09:00:00.000+00:00)"
 ISO_DUR_DESC = "ISO 8601 duration (e.g. P1D, P1W, P1M, P1Y, PT1H, PT30M)"
@@ -17,6 +17,7 @@ AGENT_MARKER = "<~ PERSONA AGENT MARKER ~>"
 DEFAULT_READ_LIMIT = 2000
 TASKS_TRAIT = ".tasks.json"
 TASK_COMMENTS_TRAIT = ".tasks_comments.jsonl"
+TASK_STATUSES = ["open", "in_progress", "blocked", "closed", "wontfix"]
 
 # shared parameter descriptions
 FILTER_JSON_DESC = 'MongoDB-style filter object (not a string). exact match: {"status": "open"}, date comparison: {"due": {"$lt": "2100-01-01T00:00:00.000+00:00"}}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. top-level keys are AND. "id" matches dict keys'
@@ -26,7 +27,8 @@ FIELDS_JSONL_DESC = 'array of field names to return (not a string). example: ["t
 TRAIT_JSON_DESC = "trait filename in traits/, must end in .json (e.g. .tasks.json)"
 TRAIT_JSONL_DESC = "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"
 TRAIT_DESC = "trait path in traits/ (e.g. SOUL.md, sub/topic.md, .data.json)"
-VALUE_DESC = 'the literal value to store, e.g. "blue", 42, [1,2], {"a":1}. passed directly as JSON, not a boolean flag'
+OPS_DESC = 'MongoDB-style update operators (not a string). supported: $set, $push, $unset. each maps dot-path → value. paths are field names (e.g. "color", "nested.size", "arr.0") — the whole document cannot be addressed, use persona_trait_write to replace or persona_trait_delete to remove the file. examples: {"$set": {"color": "blue", "nested.size": "large"}} sets fields; {"$push": {"tags": "eval"}} appends to an array (use {"$each": [a, b]} to push multiple); {"$unset": {"color": ""}} removes a field. combine operators in one call: {"$set": {...}, "$push": {...}}'
+KEY_DESC = 'dot-path selector for a field within the document (e.g. color, nested.key, arr.0). omit to return the whole document'
 
 class HookResult(TypedDict, total=False):
     system: list[str]
@@ -43,8 +45,11 @@ class HookResult(TypedDict, total=False):
 HOOKS, TOOLS = {}, {}
 
 # parameter spec: dict metadata = typed param, bare string = string type (backwards compat)
-def param(description, type="string", optional=False):
-    return {"type": type, "description": description, "optional": optional}
+def param(description, type="string", optional=False, enum=None):
+    spec = {"type": type, "description": description, "optional": optional}
+    if enum:
+        spec["enum"] = list(enum)
+    return spec
 
 def hook(fn):
     HOOKS[fn.__name__] = fn
@@ -116,9 +121,6 @@ def cleanup_empty_parents(path):
             break
         parent = parent.parent
 
-def prompt_path(name):
-    return PROMPTS / f"{name}.md"
-
 def format_trait(name):
     try:
         content = trait_path(name).read_text()
@@ -126,17 +128,19 @@ def format_trait(name):
         content = "(empty)"
     return f"\n{{trait:{name}}}\n{content}\n"
 
-# compose system prompt from preamble, mode-specific prompt, traits, and env
-def system_prompt(mode=None):
-    parts = [prompt_path("preamble").read_text()]
+# compose system prompt from preamble, mode-specific prompt, and traits.
+# prompts (preamble + mode) come from ctx.prompts, injected by evolve per the
+# prompt contract. stages without a prompt file are silently skipped.
+def system_prompt(prompts, mode=None):
+    parts = [prompts.get("preamble", "")]
     if mode:
-        parts.append(prompt_path(mode).read_text())
+        parts.append(prompts.get(mode, ""))
     parts += [format_trait(t) for t in core_trait_names()]
     listed = listed_trait_names()
     if listed:
         formatted = ", ".join(f"{{trait:{n}}}" for n in listed)
         parts.append(f"\nadditional traits (use trait_read to view): {formatted}\n")
-    return ["".join(parts)]
+    return ["".join(p for p in parts if p)]
 
 # --- trait tools ---
 
@@ -207,30 +211,33 @@ def trait_edit(
         return {"result": result_err(f"{n} matches for oldString, expected 1 (use replaceAll to replace all)")}
     if str(replaceAll).lower() == "true":
         path.write_text(content.replace(oldString, newString))
+        replacements = n
     else:
         path.write_text(content.replace(oldString, newString, 1))
-    return {"result": result_ok(), "modified": [trait],
+        replacements = 1
+    return {"result": result_ok({"replacements": replacements}), "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool(permission={"arg": "trait"})
 def trait_append(
     trait: Annotated[str, TRAIT_DESC],
-    content: Annotated[str, "text to append to the trait"],
+    content: Annotated[str, "text to append as a new line; a newline separator is prepended automatically, so do not include a leading newline"],
 ) -> HookResult:
-    """append text to the end of an existing trait. use trait_write to create new traits or replace all content"""
+    """append content as a new line at the end of an existing trait. each call adds one new line; calling twice adds two. a newline is inserted automatically before content, so callers should pass the raw text without a leading newline. use trait_write to create new traits or replace all content"""
     try:
         path = trait_path(trait)
     except ValueError as e:
         return {"result": result_err(str(e))}
     append_to_trait(trait, "\n" + content)
-    return {"result": result_ok(), "modified": [trait],
+    echo = content if len(content) <= 40 else content[:40] + "…"
+    return {"result": result_ok({"appended": echo}), "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool(permission={"arg": "trait"})
 def trait_delete(
     trait: Annotated[str, TRAIT_DESC],
 ) -> HookResult:
-    """delete a trait file from the persona. empty parent directories are removed automatically. WARNING: for .json/.jsonl traits, use data_delete or log_delete to remove individual entries instead of deleting the whole file"""
+    """delete a trait file from the persona. works for any trait type (.md, .json, .jsonl). empty parent directories are removed automatically. to remove individual fields from a .json trait without deleting the whole file, use persona_data_update with $unset"""
     try:
         path = trait_path(trait)
     except ValueError as e:
@@ -265,14 +272,13 @@ def trait_move(
 
 # --- generic structured data tools (.json traits) ---
 
+def valid_key(key):
+    """reject empty or all-dot keys; a field path must have at least one segment."""
+    return bool(key) and bool(key.strip(".")) and all(p for p in key.strip(".").split("."))
+
 def resolve_key(data, key):
     """walk a dot-path key, returning (parent, final_key, exists)."""
-    if not key:
-        return None, None, True
-    key = key.lstrip(".")
-    if not key:
-        return None, None, True
-    parts = key.split(".")
+    parts = key.strip(".").split(".")
     current = data
     for part in parts[:-1]:
         if isinstance(current, list):
@@ -290,8 +296,6 @@ def resolve_key(data, key):
 
 def get_at_key(data, key):
     """get value at dot-path key."""
-    if not key:
-        return data
     parent, final, exists = resolve_key(data, key)
     if not exists:
         return None
@@ -303,24 +307,6 @@ def get_at_key(data, key):
     if isinstance(parent, dict):
         return parent.get(final)
     return None
-
-def set_at_key(data, key, value):
-    """set value at dot-path key, returning success."""
-    if not key:
-        return value, True
-    parent, final, exists = resolve_key(data, key)
-    if not exists or parent is None:
-        return data, False
-    if isinstance(parent, list):
-        try:
-            parent[int(final)] = value
-            return data, True
-        except (ValueError, IndexError):
-            return data, False
-    if isinstance(parent, dict):
-        parent[final] = value
-        return data, True
-    return data, False
 
 def delete_at_key(data, key):
     """delete value at dot-path key, returning success."""
@@ -340,15 +326,43 @@ def delete_at_key(data, key):
         return data, True
     return data, False
 
-def append_at_key(data, key, value):
-    """append value(s) to array at dot-path key. lists are extended, scalars appended."""
-    target = get_at_key(data, key) if key else data
+def deep_set(data, key, value):
+    """set value at dot-path, auto-creating intermediate dicts (mongo $set semantics)."""
+    parts = key.strip(".").split(".")
+    current = data
+    for part in parts[:-1]:
+        if isinstance(current, list):
+            try:
+                current = current[int(part)]
+            except (ValueError, IndexError):
+                return data, False
+        elif isinstance(current, dict):
+            if part not in current or not isinstance(current[part], (dict, list)):
+                current[part] = {}
+            current = current[part]
+        else:
+            return data, False
+    final = parts[-1]
+    if isinstance(current, list):
+        try:
+            current[int(final)] = value
+            return data, True
+        except (ValueError, IndexError):
+            return data, False
+    if isinstance(current, dict):
+        current[final] = value
+        return data, True
+    return data, False
+
+def deep_push(data, key, items):
+    """push items to array at dot-path, auto-creating the array if absent."""
+    target = get_at_key(data, key)
+    if target is None:
+        data, ok = deep_set(data, key, list(items))
+        return data, ok
     if not isinstance(target, list):
         return data, False
-    if isinstance(value, list):
-        target.extend(value)
-    else:
-        target.append(value)
+    target.extend(items)
     return data, True
 
 def load_json_trait(name):
@@ -505,20 +519,20 @@ def _match_record_filter(record, filter_obj):
 @tool(permission={"arg": "trait"})
 def data_query(
     trait: Annotated[str, TRAIT_JSON_DESC],
-    key: Annotated[str, param("dot-path to a nested value (e.g. mykey, nested.key). omit to query the whole file. not needed for dict-of-dicts like .tasks.json", optional=True)] = "",
+    key: Annotated[str, param(KEY_DESC, optional=True)] = "",
     filter: Annotated[object, param(FILTER_JSON_DESC, type="object", optional=True)] = None,
     fields: Annotated[object, param(FIELDS_JSON_DESC, type="array[string]", optional=True)] = None,
     limit: Annotated[str, param("max entries to return (default 50, applied after filter)", optional=True)] = "50",
     offset: Annotated[str, param("skip first N entries (default 0)", optional=True)] = "0",
 ) -> HookResult:
-    """query structured data from a .json trait. without key, operates on the whole file. on dict-of-dicts, supports MongoDB-style filter on values with id matching on keys"""
+    """query structured data from a .json trait. omit key to return the whole document. on dict-of-dicts, supports MongoDB-style filter on values with id matching on keys"""
     try:
         filter = _coerce_json(filter, dict)
         if filter is not None and not isinstance(filter, dict):
             raise ValueError(f'filter must be a JSON object like {{"status": "open"}}, got string: {str(filter)[:80]}')
         fields = _validate_fields(fields)
         data = load_json_trait(trait)
-        selected = get_at_key(data, key) if key else data
+        selected = get_at_key(data, key) if valid_key(key) else data
         # dict-of-dicts: apply filter, pagination, fields projection
         if isinstance(selected, dict) and filter is not None or (
             isinstance(selected, dict) and (fields is not None or int(limit) < len(selected) or int(offset) != 0)
@@ -547,61 +561,48 @@ def data_query(
 @tool(permission={"arg": "trait"})
 def data_update(
     trait: Annotated[str, TRAIT_JSON_DESC],
-    key: Annotated[str, param("dot-path selector (e.g. mykey, nested.key, arr.0)", optional=True)] = "",
-    value: Annotated[object, param(VALUE_DESC, type="any")] = None,
+    ops: Annotated[object, param(OPS_DESC, type="object")] = None,
 ) -> HookResult:
-    """set a value in a .json trait at a dot-path key, or overwrite the whole file"""
+    """modify a .json trait using MongoDB-style update operators ($set, $push, $unset). auto-creates the trait on first write. paths are dot-separated; use "." to address the whole document"""
     try:
+        ops = _coerce_json(ops, dict)
+        if not isinstance(ops, dict) or not ops:
+            return {"result": result_err('ops must be a non-empty object like {"$set": {"color": "blue"}}')}
+        for op, fields in ops.items():
+            if op not in ("$set", "$push", "$unset"):
+                return {"result": result_err(f"unknown operator: {op} (supported: $set, $push, $unset)")}
+            if not isinstance(fields, dict):
+                return {"result": result_err(f"{op} expects an object of path→value, got {type(fields).__name__}")}
         try:
             data = load_json_trait(trait)
         except FileNotFoundError:
             data = {}
-        if not key:
-            save_json_trait(trait, value)
-        else:
-            data, ok = set_at_key(data, key, value)
-            if not ok:
-                return {"result": result_err(f"key not reachable: {key}")}
-            save_json_trait(trait, data)
-        return {"result": result_ok(), "modified": [trait],
-                "notify": [{"type": "trait_changed", "files": [trait]}]}
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-
-@tool(permission={"arg": "trait"})
-def data_delete(
-    trait: Annotated[str, TRAIT_JSON_DESC],
-    key: Annotated[str, "dot-path selector to delete (e.g. mykey, nested.key, arr.0)"],
-) -> HookResult:
-    """delete a key or array index from a .json trait"""
-    try:
-        data = load_json_trait(trait)
-        data, ok = delete_at_key(data, key)
-        if not ok:
-            return {"result": result_err(f"key not found: {key}")}
+        modified_paths = []
+        for op, fields in ops.items():
+            for path, val in fields.items():
+                if not valid_key(path):
+                    return {"result": result_err(f"{op}: path must be a field name (e.g. \"color\", \"nested.size\"); the whole document cannot be addressed — use persona_trait_write to replace or persona_trait_delete to remove the file")}
+                if op == "$set":
+                    data, ok = deep_set(data, path, val)
+                    if not ok:
+                        return {"result": result_err(f"$set: path not reachable: {path}")}
+                elif op == "$unset":
+                    data, ok = delete_at_key(data, path)
+                    if not ok:
+                        return {"result": result_err(f"$unset: path not found: {path}")}
+                elif op == "$push":
+                    if isinstance(val, dict) and "$each" in val:
+                        items = val["$each"]
+                        if not isinstance(items, list):
+                            return {"result": result_err(f"$push {path}: $each expects an array")}
+                    else:
+                        items = [val]
+                    data, ok = deep_push(data, path, items)
+                    if not ok:
+                        return {"result": result_err(f"$push: target is not an array: {path}")}
+                modified_paths.append(path)
         save_json_trait(trait, data)
-        return {"result": result_ok(), "modified": [trait],
-                "notify": [{"type": "trait_changed", "files": [trait]}]}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": result_err(str(e))}
-
-@tool(permission={"arg": "trait"})
-def data_append(
-    trait: Annotated[str, TRAIT_JSON_DESC],
-    key: Annotated[str, param("dot-path to array (empty = root array)", optional=True)] = "",
-    value: Annotated[object, param(VALUE_DESC, type="any")] = None,
-) -> HookResult:
-    """append a value to an array in a .json trait"""
-    try:
-        try:
-            data = load_json_trait(trait)
-        except FileNotFoundError:
-            data = []
-        data, ok = append_at_key(data, key, value)
-        if not ok:
-            return {"result": result_err("target is not an array")}
-        save_json_trait(trait, data)
-        return {"result": result_ok(), "modified": [trait],
+        return {"result": result_ok({"modified_paths": modified_paths}), "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
     except ValueError as e:
         return {"result": result_err(str(e))}
@@ -693,7 +694,7 @@ def record_append(
     trait: Annotated[str, TRAIT_JSONL_DESC],
     fields: Annotated[object, param('flat object mapping field names directly to values. example: {"type": "observation", "content": "saw a bird"}. each key is a field name, each value is the literal value to store (string, number, boolean, array, or object). do NOT wrap values in extra objects — pass them directly', type="object")] = None,
 ) -> HookResult:
-    """append a timestamped record to a .jsonl trait. timestamp is added automatically"""
+    """append one new record to a .jsonl trait. each call adds a new entry with an automatic UTC timestamp; calling twice creates two records"""
     try:
         if not trait.endswith(".jsonl"):
             return {"result": result_err("trait must have .jsonl extension")}
@@ -701,10 +702,11 @@ def record_append(
         if not isinstance(fields, dict) or not any(v for v in fields.values()):
             return {"result": result_err("fields must be a JSON object with at least one non-empty value")}
         fields = _normalize_fields(fields)
-        record = {"timestamp": format_iso(datetime.now(timezone.utc))}
+        timestamp = format_iso(datetime.now(timezone.utc))
+        record = {"timestamp": timestamp}
         record.update(fields)
         append_record(trait, record)
-        return {"result": result_ok(), "modified": [trait],
+        return {"result": result_ok({"timestamp": timestamp}), "modified": [trait],
                 "notify": [{"type": "trait_changed", "files": [trait]}]}
     except (ValueError, FileNotFoundError) as e:
         return {"result": result_err(str(e))}
@@ -812,7 +814,7 @@ def save_tasks(data):
 def task_create(
     title: Annotated[str, "task title"],
     description: Annotated[str, param("detailed task description", optional=True)] = "",
-    status: Annotated[str, param("task status (default: open)", optional=True)] = "open",
+    status: Annotated[str, param(f"task status (default: open). one of: {', '.join(TASK_STATUSES)}", optional=True, enum=TASK_STATUSES)] = "open",
     due: Annotated[str, param(f"due date as {ISO_DT_DESC}", optional=True)] = "",
     interval: Annotated[str, param(f"recurrence as {ISO_DUR_DESC}. recurring tasks are updated via persona_task_comment, which auto-bumps due by this interval", optional=True)] = "",
     fields: Annotated[object, param("arbitrary extra fields to set, e.g. {\"owner\": \"tom\"}", type="object", optional=True)] = None,
@@ -851,7 +853,7 @@ def task_update(
     id: Annotated[str, "task UUID"],
     title: Annotated[str, param("new title", optional=True)] = "",
     description: Annotated[str, param("new description", optional=True)] = "",
-    status: Annotated[str, param("new status", optional=True)] = "",
+    status: Annotated[str, param(f"new status. one of: {', '.join(TASK_STATUSES)}", optional=True, enum=TASK_STATUSES)] = "",
     due: Annotated[str, param(f"new due date as {ISO_DT_DESC}. for recurring tasks, prefer persona_task_comment to auto-bump due by interval", optional=True)] = "",
     interval: Annotated[str, param(f"recurrence as {ISO_DUR_DESC}. requires due", optional=True)] = "",
     fields: Annotated[object, param("arbitrary extra fields to set, e.g. {\"owner\": \"tom\", \"cc\": \"alice\"}", type="object", optional=True)] = None,
@@ -942,7 +944,7 @@ def mutate_request(ctx: dict) -> HookResult:
         debug("no agent marker, skipping")
         return {}
     debug(f"core: {', '.join(core_trait_names())}, listed: {', '.join(listed_trait_names())}")
-    return {"system": system_prompt("chat")}
+    return {"system": system_prompt(ctx.get("prompts", {}), "chat")}
 
 @hook
 def format_notification(ctx: dict) -> HookResult:
@@ -971,25 +973,21 @@ def idle(ctx: dict) -> HookResult:
 @hook
 def heartbeat(ctx: dict) -> HookResult:
     debug(f"core: {', '.join(core_trait_names())}, listed: {', '.join(listed_trait_names())}")
-    try:
-        user = prompt_path("heartbeat").read_text()
-        debug(f"heartbeat prompt len={len(user)}")
-        if not user.strip():
-            debug("heartbeat prompt is empty, skipping")
-            return {}
-        return {"system": system_prompt("heartbeat"), "user": user}
-    except FileNotFoundError:
-        debug("heartbeat.md not found, skipping")
+    prompts = ctx.get("prompts", {})
+    user = (prompts.get("heartbeat") or "").strip()
+    if not user:
+        debug("no heartbeat prompt in ctx, skipping")
         return {}
+    return {"system": system_prompt(prompts, "heartbeat"), "user": user}
 
 @hook
 def recover(ctx: dict) -> HookResult:
     debug(f"recovering from {ctx.get('failed_hook', '?')}: {ctx.get('error', '?')}")
-    try:
-        return {"system": system_prompt("recover"), "user": prompt_path("recover").read_text()}
-    except Exception as e:
-        debug(f"recover prompts unavailable: {e}")
+    prompts = ctx.get("prompts", {})
+    user = prompts.get("recover", "")
+    if not user:
         return {"system": ["system recovery — prompts unavailable"]}
+    return {"system": system_prompt(prompts, "recover"), "user": user}
 
 @hook
 def tool_before(ctx: dict) -> HookResult:
@@ -1002,11 +1000,9 @@ def tool_after(ctx: dict) -> HookResult:
 @hook
 def compacting(ctx: dict) -> HookResult:
     debug(f"core: {', '.join(core_trait_names())}, listed: {', '.join(listed_trait_names())}")
-    try:
-        return {"prompt": prompt_path("compaction").read_text()}
-    except FileNotFoundError:
-        debug("compaction.md not found, skipping")
-        return {}
+    # evolve applies the compaction.md default if we return nothing; persona
+    # has no extra composition to layer on top, so defer to the default.
+    return {}
 
 # dispatch to @tool-registered handler by name
 @hook
