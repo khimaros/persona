@@ -246,7 +246,7 @@ def trait_delete(
         return {"result": result_err(f"not found: {trait}")}
     path.unlink()
     cleanup_empty_parents(path)
-    return {"result": result_ok(), "modified": [trait],
+    return {"result": result_ok({"deleted": 1}), "modified": [trait],
             "notify": [{"type": "trait_changed", "files": [trait]}]}
 
 @tool(permission={"arg": ["old_trait", "new_trait"]})
