@@ -28,6 +28,12 @@ permission:
     #"evolve_tool_*": allow
     "persona_*": allow
     #"persona_trait_*": allow
+    persona_trait_edit:
+        "*": allow
+        "SOUL.md": ask
+    persona_trait_write:
+        "*": allow
+        "SOUL.md": ask
     # opencode tools
     "external_directory":
         "*": deny
