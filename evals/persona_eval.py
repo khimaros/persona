@@ -353,6 +353,91 @@ def send_prompt(session_id, state, text):
 
 # === eval tests ===
 
+# --- bootstrap onboarding (must run first) ---
+
+# BOOTSTRAP.md is a workspace seed file (see traits/BOOTSTRAP.md): it prompts
+# a newly-born persona to ask a fixed set of questions, save answers to
+# SOUL.md + USER.md, then delete itself. this eval assumes the trait is
+# already present on disk — the eval does not seed it, because coaching the
+# agent through a write would taint the onboarding flow we're measuring.
+# consequence: this class is single-shot. once it passes, BOOTSTRAP.md is
+# gone and subsequent runs will fail test_01 until the workspace is reseeded
+# out-of-band.
+
+# single reply that answers every question from BOOTSTRAP.md in one shot.
+# intentionally free-form prose: we want to verify persona follows BOOTSTRAP.md's
+# instructions on its own (which traits to update, when to delete the file),
+# not that it can obey explicit per-call coaching from the user.
+BOOTSTRAP_ANSWERS = (
+    "answers to all your questions, in order. "
+    "about you: be a curious, action-oriented mind; the values that matter "
+    "most are honesty, clarity, and kindness; explore software, philosophy, "
+    "and systems thinking first; grow through reflection on what you do and "
+    "steady refinement over time; your name is Kestrel. "
+    "about me: call me Pat; i'm a software engineer working on AI collaboration "
+    "tools; i hope you become a thoughtful long-running collaborator; "
+    "i prefer brief and casual communication; avoid deeply personal topics "
+    "and don't commit or push code without asking."
+)
+
+def _has_call(calls, tool_names, trait):
+    """true if any actual call writes/appends/deletes the given trait via one of tool_names."""
+    names = tool_names if isinstance(tool_names, (list, tuple, set)) else (tool_names,)
+    return any(c["tool"] in names and c["input"].get("trait") == trait for c in calls)
+
+class TestBootstrap:
+    """verify persona's onboarding flow: sees BOOTSTRAP.md, asks its questions,
+    then on receiving answers writes SOUL.md + USER.md and deletes BOOTSTRAP.md."""
+
+    def test_01_greeting_triggers_questions(self, session_id, state):
+        """a fresh greeting should make persona recognize BOOTSTRAP.md and ask
+        at least one of its onboarding questions rather than just greeting back."""
+        r = send_prompt(session_id, state, "hello")
+        # persona should NOT have written SOUL/USER or deleted BOOTSTRAP yet —
+        # the first turn is for asking, not completing.
+        assert not _has_call(r.calls, ("persona_trait_delete",), "BOOTSTRAP.md"), (
+            f"persona deleted BOOTSTRAP.md before gathering any answers\n{r.diag}")
+        assert not _has_call(r.calls, ("persona_trait_write", "persona_trait_append"), "SOUL.md"), (
+            f"persona wrote SOUL.md before receiving answers\n{r.diag}")
+        assert not _has_call(r.calls, ("persona_trait_write", "persona_trait_append"), "USER.md"), (
+            f"persona wrote USER.md before receiving answers\n{r.diag}")
+        # text should contain a question directed at the user. BOOTSTRAP.md's
+        # questions cover: name, values, topics, growth, what to call them,
+        # their work, hopes, communication style, boundaries.
+        assert "?" in r.text, f"expected persona to ask a question\n{r.diag}"
+        assert_text(r, r"name|call (you|me)|values|explore|communicate|boundaries|work on|become")
+
+    def test_02_answers_complete_onboarding(self, session_id, state):
+        """once the user answers, persona must persist SOUL.md and USER.md and
+        delete BOOTSTRAP.md so it won't re-run onboarding next session."""
+        r = send_prompt(session_id, state, BOOTSTRAP_ANSWERS)
+        soul_written = _has_call(
+            r.calls, ("persona_trait_write", "persona_trait_append", "persona_trait_edit"), "SOUL.md")
+        user_written = _has_call(
+            r.calls, ("persona_trait_write", "persona_trait_append", "persona_trait_edit"), "USER.md")
+        bootstrap_deleted = _has_call(r.calls, ("persona_trait_delete",), "BOOTSTRAP.md")
+        assert soul_written, f"expected SOUL.md to be written with persona answers\n{r.diag}"
+        assert user_written, f"expected USER.md to be written with user answers\n{r.diag}"
+        assert bootstrap_deleted, f"expected BOOTSTRAP.md to be deleted after onboarding\n{r.diag}"
+        # BOOTSTRAP.md instructs the delete be the LAST step. guard against the
+        # order getting inverted (delete first, then write — which would leave
+        # onboarding half-done if the session crashed between the two).
+        delete_idx = next(i for i, c in enumerate(r.calls)
+                          if c["tool"] == "persona_trait_delete"
+                          and c["input"].get("trait") == "BOOTSTRAP.md")
+        last_soul_idx = max(
+            (i for i, c in enumerate(r.calls)
+             if c["tool"] in ("persona_trait_write", "persona_trait_append", "persona_trait_edit")
+             and c["input"].get("trait") == "SOUL.md"),
+            default=-1)
+        last_user_idx = max(
+            (i for i, c in enumerate(r.calls)
+             if c["tool"] in ("persona_trait_write", "persona_trait_append", "persona_trait_edit")
+             and c["input"].get("trait") == "USER.md"),
+            default=-1)
+        assert delete_idx > last_soul_idx and delete_idx > last_user_idx, (
+            f"BOOTSTRAP.md must be deleted after writing SOUL.md and USER.md\n{r.diag}")
+
 # --- core expansion (answer from system prompt, no tools) ---
 
 class TestCoreExpansion:
@@ -522,6 +607,9 @@ class TestRecurringTask:
         r = send_prompt(session_id, state,
             "do the work described by my next due recurring task right now")
         assert_calls(r, [
+            # accept either a single write OR the first of N incremental appends.
+            # extra appends for poems.md are whitelisted in `also` below so the
+            # LLM can build the poem line-by-line without tripping the count check.
             C("persona_trait_write", args={"trait": "poems.md"}, output={"success": True})
             | C("persona_trait_append", args={"trait": "poems.md"}, output={"success": True}),
             C("persona_task_comment", output={"success": True}),
@@ -531,6 +619,7 @@ class TestRecurringTask:
             C("evolve_datetime"),
             C("glob"),
             C("persona_trait_read", args={"trait": "poems.md"}),
+            C("persona_trait_append", args={"trait": "poems.md"}, output={"success": True}),
         ])
         comment_call = next(c for c in r.calls if c["tool"] == "persona_task_comment")
         comment_out = parse_tool_output(comment_call["output"])

@@ -6,6 +6,7 @@ INSTANCE?="persona-eval"
 #MODEL?="custom/minimax-m2.7:UD-IQ4_XS"
 #MODEL?="custom/qwen3.5-27b:Q8_0"
 #MODEL?="custom/qwen3.5-35b-a3b:Q8_0"
+#MODEL?="custom/qwen3.6-27b:Q8_0"
 MODEL?="custom/qwen3.6-35b-a3b:Q8_0"
 
 FILTER?=
@@ -18,7 +19,7 @@ test:
 .PHONY: test
 
 eval:
-	make INSTANCE=$(INSTANCE) -C server/ reset-workspace service-restart && sleep 5
+	make INSTANCE=$(INSTANCE) -C server/ reset-workspace disable-heartbeat service-restart && sleep 5
 	rm -f /tmp/eval-run-*.xml
 	for i in $$(seq 1 $(REPEAT)); do \
 		echo "=== eval run $$i/$(REPEAT) ==="; \

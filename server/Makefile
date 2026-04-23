@@ -115,6 +115,13 @@ service-restart:
 	ssh $(USER_NAME)@$(ADDRESS) -- systemctl --user restart opencode.service
 .PHONY: service-restart
 
+# force heartbeats off by appending EVOLVE_HEARTBEAT_MS=-1 to persona.env
+# (systemd EnvironmentFile: last duplicate wins). idempotent — removes any
+# existing uncommented line first. caller should service-restart afterwards.
+disable-heartbeat:
+	ssh $(USER_NAME)@$(ADDRESS) -- 'sed -i "/^EVOLVE_HEARTBEAT_MS=/d" $(USER_HOME)/.config/opencode/persona.env && echo EVOLVE_HEARTBEAT_MS=\"-1\" >> $(USER_HOME)/.config/opencode/persona.env'
+.PHONY: disable-heartbeat
+
 screen:
 	ssh -o ForwardX11=yes -t $(USER_NAME)@$(ADDRESS) -- screen -x -R -S control
 .PHONY: screen

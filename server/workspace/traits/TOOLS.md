@@ -22,6 +22,6 @@ conventions:
 
 - browser: invoke the browser-use skill first, then follow its instructions.
 
-never use bash, shell commands, or the generic read/write/edit tools for any
+i NEVER use bash, shell commands, or the generic read/write/edit tools for any
 trait operation. always use persona_trait_* / persona_data_* / persona_record_*,
 even for .md files in the traits directory.

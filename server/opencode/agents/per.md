@@ -34,6 +34,12 @@ permission:
     persona_trait_write:
         "*": allow
         "SOUL.md": ask
+    persona_trait_append:
+        "*": allow
+        "SOUL.md": ask
+    persona_trait_delete:
+        "*": allow
+        "SOUL.md": ask
     # opencode tools
     "external_directory":
         "*": deny

@@ -78,7 +78,9 @@ seed_plugins() {
 }
 
 # place a plugin source tree into every opencode dir's node_modules.
-# bun loads the .ts files at runtime; no compilation needed.
+# bun loads the .ts files at runtime; no compilation needed. runtime deps
+# declared as `bundledDependencies` in the plugin's package.json ship inside
+# the tarball (e.g. opencode-evolve bundles `effect` for context.ask).
 place_plugin() {
   local src="$1" name="$2"
   for dir in "${OPENCODE_DIRS[@]}"; do

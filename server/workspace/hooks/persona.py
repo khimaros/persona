@@ -138,7 +138,7 @@ def system_prompt(prompts, mode=None):
     parts += [format_trait(t) for t in core_trait_names()]
     listed = listed_trait_names()
     if listed:
-        formatted = ", ".join(f"{{trait:{n}}}" for n in listed)
+        formatted = ", ".join(f"{n}" for n in listed)
         parts.append(f"\nadditional traits (use trait_read to view): {formatted}\n")
     return ["".join(p for p in parts if p)]
 
