@@ -94,6 +94,7 @@ permission:
         "browser-use scroll *": allow
         "browser-use get *": allow
         "browser-use tab *": allow
+        "browser-use tab close *": ask
         # browser-head handles session startup
         "browser-use open *": allow
         #"browser-use open https://news.ycombinator.com*": allow

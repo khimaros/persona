@@ -8,10 +8,12 @@
     "build": { "disable": true },
     "plan": { "disable": true },
     "general": { "disable": true },
-    "explore": { "disable": true }
+    "explore": { "disable": true },
+    "title": { "disable": true }
   },
   "plugin": [
     "opencode-gemini-auth@latest",
+    //"opencode-claude-auth@latest",
     "file:///home/persona/.config/opencode/plugins.ts"
   ]
 }
