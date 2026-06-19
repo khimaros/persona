@@ -1,0 +1,21 @@
+# eval-only overrides, layered over docker-compose.yml by the `eval` / `eval-bridge` make targets
+# (NEVER by `make up`, so the dev container is untouched and keeps its real bridge creds).
+#
+# CRITICAL SAFETY: the eval MUST NEVER touch the real matrix account. persona.env holds the live
+# HMUX_BRIDGE_* credentials via env_file; these EXPLICIT environment values override env_file (an explicit
+# key always wins, unlike a bare pass-through whose precedence is compose-implementation-specific).
+# Default empty -> the bridge face idles and never connects anywhere. `make eval-bridge` fills them
+# from the shell with a THROWAWAY fake homeserver (@per:fake.local on host.containers.internal), so
+# even the bridge eval only ever reaches the local fake, never the real server.
+services:
+  persona:
+    # let the container reach a fake-matrix on the host (the bridge eval points HMUX_BRIDGE_HOMESERVER at it).
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+    environment:
+      - HMUX_BRIDGE_HOMESERVER=${HMUX_BRIDGE_HOMESERVER:-}
+      - HMUX_BRIDGE_USER_ID=${HMUX_BRIDGE_USER_ID:-}
+      - HMUX_BRIDGE_ACCESS_TOKEN=${HMUX_BRIDGE_ACCESS_TOKEN:-}
+      # force headless in evals: the base compose forwards the dev's $DISPLAY, but eval browser
+      # tests must stay headless (deterministic, no window popping up on the dev's desktop).
+      - DISPLAY=

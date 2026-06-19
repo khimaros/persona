@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+# manage a chrome instance with browser-use session.
+
+export PATH="${HOME}/.local/bin:${PATH}"
+
+CHROME_PROFILE="${HOME}/.chrome-profile/"
+DEBUG_PORT=9222
+CONNECT_RETRIES=10
+CONNECT_DELAY=1
+PIDFILE="/tmp/browser-head.pid"
+
+# launch chrome (extra args select headed vs headless), wait for browser-use to connect, and record
+# the pid. returns 0 once connected; 1 if chrome exits or never accepts a connection, so the caller
+# can retry (e.g. headed -> headless when the X display is unreachable). CHROME_BASE_ARGS is set by
+# cmd_start (a global so this sees it).
+_launch_chrome() {
+  local logfile="/tmp/browser-head.log"
+  google-chrome "${CHROME_BASE_ARGS[@]}" "$@" >"${logfile}" 2>&1 &
+  local chrome_pid=$!
+
+  echo "[*] waiting for chrome to accept connections (pid ${chrome_pid})..."
+  for i in $(seq 1 "${CONNECT_RETRIES}"); do
+    if ! kill -0 "${chrome_pid}" 2>/dev/null; then
+      # chrome exited: another instance may already own the profile/port
+      if browser-use connect >/dev/null 2>&1; then
+        echo "[*] connected to existing chrome instance"
+        return 0
+      fi
+      echo "[!] chrome process exited, log:"
+      tail -20 "${logfile}"
+      return 1
+    fi
+    if browser-use connect >/dev/null 2>&1; then
+      echo "[*] browser-use connected"
+      echo "${chrome_pid}" > "${PIDFILE}"
+      disown "${chrome_pid}"
+      return 0
+    fi
+    sleep "${CONNECT_DELAY}"
+  done
+  echo "[!] chrome did not accept a connection in time"
+  kill "${chrome_pid}" 2>/dev/null
+  return 1
+}
+
+cmd_start() {
+  # reuse existing session if one is already running
+  echo "[*] checking for existing browser sessions..."
+  browser-use sessions 2>&1 || true
+
+  if browser-use connect >/dev/null 2>&1; then
+    echo "[*] existing browser session found, reusing"
+    return 0
+  else
+    echo "[*] no connectable browser session on port ${DEBUG_PORT}"
+  fi
+
+  # clean up stale lock only if no chrome process owns this profile
+  if [ -L "${CHROME_PROFILE}/SingletonLock" ] && ! pgrep -f "user-data-dir=${CHROME_PROFILE}" >/dev/null; then
+    echo "[*] killing orphaned chrome processes..."
+    pkill -9 -f "user-data-dir=${CHROME_PROFILE}" 2>/dev/null || true
+    sleep 0.5
+    echo "[*] removing stale SingletonLock..."
+    rm -f "${CHROME_PROFILE}/SingletonLock"
+  fi
+
+  # args common to every launch. a container's /dev/shm defaults to ~64M, too small for chrome (it
+  # crashes), so point shared memory at /tmp instead -- a container constraint, harmless anywhere, so
+  # always on. we run UNPRIVILEGED (the persona container drops to the hmux user via hmux-drop), so
+  # chrome keeps its sandbox: no --no-sandbox. global so _launch_chrome sees it.
+  CHROME_BASE_ARGS=(
+    --user-data-dir="${CHROME_PROFILE}"
+    --remote-debugging-port="${DEBUG_PORT}"
+    --disable-dev-shm-usage
+  )
+
+  # headed when $DISPLAY is set AND the X server is reachable; otherwise fall back to headless so
+  # browsing keeps working with no display access -- an autonomous run, or $DISPLAY forwarded into
+  # the container (docker-compose.yml) while the host's X server does not grant it. a rejected headed
+  # chrome exits fast, which _launch_chrome reports, so we just retry headless.
+  if [ -n "${DISPLAY}" ]; then
+    echo "[*] starting browser head on ${DISPLAY}..."
+    _launch_chrome && return 0
+    echo "[!] headed launch failed, falling back to headless..."
+    rm -f "${CHROME_PROFILE}/SingletonLock"
+  fi
+  echo "[*] launching in headless mode..."
+  _launch_chrome --headless
+}
+
+cmd_wait() {
+  if [ ! -f "${PIDFILE}" ]; then
+    echo "[!] no pidfile found, is chrome running?"
+    return 1
+  fi
+  local pid
+  pid=$(cat "${PIDFILE}")
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    echo "[!] chrome process ${pid} is not running"
+    rm -f "${PIDFILE}"
+    return 1
+  fi
+  echo "[*] waiting for chrome to exit (pid ${pid})..."
+  tail --pid="${pid}" -f /dev/null
+  echo "[*] closing browser-use session..."
+  browser-use close >/dev/null 2>&1
+  rm -f "${PIDFILE}"
+  echo "[*] done"
+}
+
+cmd_status() {
+  if [ -f "${PIDFILE}" ] && kill -0 "$(cat "${PIDFILE}")" 2>/dev/null; then
+    echo "[*] chrome running (pid $(cat "${PIDFILE}"))"
+  else
+    echo "[*] chrome not running"
+  fi
+  if browser-use connect >/dev/null 2>&1; then
+    echo "[*] browser-use session active"
+  else
+    echo "[*] browser-use session inactive"
+  fi
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_start
+}
+
+cmd_stop() {
+  echo "[*] closing browser-use session..."
+  browser-use close >/dev/null 2>&1
+
+  if [ -f "${PIDFILE}" ]; then
+    local pid
+    pid=$(cat "${PIDFILE}")
+    echo "[*] stopping chrome (pid ${pid})..."
+    kill "${pid}" 2>/dev/null
+    rm -f "${PIDFILE}"
+  fi
+
+  # kill any remaining chrome subprocesses (renderers, gpu, etc.)
+  pkill -9 -f "user-data-dir=${CHROME_PROFILE}" 2>/dev/null || true
+  rm -f "${CHROME_PROFILE}/SingletonLock"
+
+  echo "[*] done"
+}
+
+case "${1}" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_restart ;;
+  status)  cmd_status ;;
+  wait)    cmd_wait ;;
+  *)       echo "usage: browser-head {start|stop|restart|status|wait}" >&2; exit 1 ;;
+esac

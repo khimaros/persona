@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# provision the matrix access token the hmux bridge face uses, into persona.env.
+#
+# HOST-side, and not a skill: it rewrites the host's persona.env (compose reads that at container
+# CREATE, so new credentials need `make down && make up`, not a restart) and shells out to the hmux
+# checkout beside persona. neither exists inside the container, so the agent could never run it.
+#
+# a thin wrapper: hmux OWNS the implementation, because hmux owns the contract it enforces. the
+# bridge never logs in itself -- it whoamis the token it is handed and restores that (user, device)
+# session, so the token must resolve to a device belonging to the bot. a token borrowed from an
+# interactive client dies when that client logs out, and shares its crypto identity.
+#
+#   matrix-login          password login, reusing persona.env's homeserver + user
+#   matrix-login --token  adopt a token you already have (prompted, never on argv)
+#   matrix-login --check  validate the token persona.env already carries; writes nothing
+#
+# existing env vars and comments are preserved; commented-out HMUX_BRIDGE_* keys are uncommented.
+# re-issuing a token mints a NEW device, which makes the bridge's per-device crypto store
+# (.hcp/bridge, relative to the bridge's cwd) stale -- wipe it after a re-issue.
+#
+# any argument is passed through. set HMUX_REPO if hmux is not checked out beside persona.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+persona_root="$(cd "$here/.." && pwd)"
+hmux_repo="${HMUX_REPO:-$persona_root/../hmux}"
+script="$hmux_repo/scripts/matrix-login"
+
+if [ ! -x "$script" ]; then
+  echo "matrix-login: not found at $script" >&2
+  echo "check out hmux beside persona, or set HMUX_REPO to its path." >&2
+  exit 1
+fi
+
+exec "$script" --env-file "$persona_root/persona.env" "$@"

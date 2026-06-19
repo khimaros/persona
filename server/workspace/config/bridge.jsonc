@@ -1,6 +1,0 @@
-{
-  "default_trigger": "mention",
-  "agent": "per",
-  "cleanup": "compact",
-  "cleanup_tokens": 100000
-}

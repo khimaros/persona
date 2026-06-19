@@ -1,30 +1,61 @@
 #!/usr/bin/env python3
-"""eval harness: send natural language queries via opencode and verify tool calls.
+"""eval harness: drive the persona agent over the hmux NATIVE hub api and verify
+its tool calls + text.
 
-requires a running opencode server with the persona agent configured.
+the eval is a native hmux CLIENT (see hub.py): it connects to the hub over a
+websocket, creates and drives a session, and reads the normalized session.event
+stream -- no opencode-wire face in between. it works against any hmux backend
+(pi, opencode, ...) persona runs behind the hub.
 
 usage:
     make eval
-    OPENCODE_URL=http://host:4096 pytest evals/persona_eval.py -v
+    HUB_URL=ws://host:4280/ws BACKEND_MODEL=kairos/qwen3.5-9b:Q8_0 pytest evals/persona_eval.py -v
 
 environment:
-    OPENCODE_URL      server base URL (required, set by Makefile from container ADDRESS)
-    OPENCODE_DIR      project directory for x-opencode-directory header (default: cwd)
-    OPENCODE_AGENT    agent name (default: per)
-    OPENCODE_MODEL    model ID override, e.g. anthropic/claude-sonnet-4-20250514
+    HUB_URL          hub websocket url (default ws://127.0.0.1:4280/ws)
+    BACKEND_AGENT    agent name (default: per; a no-op for the pi backend, which picks
+                     its agent out-of-band, but honored by backends that read it)
+    BACKEND_MODEL    model id "provider/id", e.g. kairos/qwen3.5-9b:Q8_0
+    REASONING        thinking level applied per session (default: off; e.g. low/medium/high)
+    PROMPT_TIMEOUT   seconds to wait for one turn to finish (default 600)
+    BROWSER_PROMPT_TIMEOUT
+                     the same, for the browsing turns, which are a dozen live page loads
+                     long (default 1800)
 """
 
-import json, os, re, time, warnings
-import urllib.request, urllib.error
+import json, os, re, sys, time, warnings
 import pytest
 
-BASE_URL = os.environ.get("OPENCODE_URL", "")
-DIRECTORY = os.environ.get("OPENCODE_DIR", os.getcwd())
-AGENT = os.environ.get("OPENCODE_AGENT", "per")
-MODEL = os.environ.get("OPENCODE_MODEL", "")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from hub import HubClient
 
-POLL_INTERVAL = 2
-POLL_TIMEOUT = 86400
+HUB_URL = os.environ.get("HUB_URL", "ws://127.0.0.1:4280/ws")
+AGENT = os.environ.get("BACKEND_AGENT", "per")
+MODEL = os.environ.get("BACKEND_MODEL", "")
+# thinking level, pinned per session. off is the calibrated default: reasoning makes
+# models substitute their own reasoned-out reply for the injected persona instructions,
+# which tanks instruction-following (qwen3.6-35b-a3b: 29/31 at off vs 14/31 at high).
+REASONING = os.environ.get("REASONING", "off")
+# hard per-turn wall-clock cap. covers a cold model load (~2min) + a normal turn; a runaway
+# generation is aborted at the cap (send_prompt then session.aborts it, stopping the event
+# flood) rather than allowed to accumulate unboundedly and peg CPU/memory.
+PROMPT_TIMEOUT = int(os.environ.get("PROMPT_TIMEOUT", "600"))
+# BROWSING is a different order of turn: each step is a real page load plus a model decision, so
+# "summarize three comment threads" is a dozen round trips against a live site. one such turn hit
+# the 600s cap with the model mid-task, having already visited all three threads -- a failure that
+# says nothing about the agent. raising the GLOBAL cap instead would blunt the runaway guard for
+# every other test, where 600s already means something is wrong.
+BROWSER_PROMPT_TIMEOUT = int(os.environ.get("BROWSER_PROMPT_TIMEOUT", "1800"))
+# a turn producing this many stream events is a runaway (a normal turn, even a long reasoning
+# one, is a few thousand at most); abort it immediately so its flood cannot exhaust memory.
+RUNAWAY_MAX_EVENTS = int(os.environ.get("RUNAWAY_MAX_EVENTS", "20000"))
+
+POLL_INTERVAL = 0.1
+
+# the module-wide client (set by the `hub` fixture) that send_prompt drives, plus the
+# set of interceptor request ids already resolved (idempotent across turns).
+_CLIENT = None
+_RESOLVED = set()
 
 # test data constants
 TEST_TRAIT = "eval_test_trait.md"
@@ -41,74 +72,156 @@ TEST_JOURNAL_CONTENT = "eval test observation: the sky is particularly blue toda
 TEST_TRAIT_RENAME = "eval_test_trait_renamed.md"
 TEST_DATA_TRAIT = ".eval_data.json"
 
-# --- HTTP helpers ---
+# --- native hub helpers ---
 
-def api(method, path, body=None, expect_empty=False):
-    url = f"{BASE_URL}{path}"
-    headers = {"Content-Type": "application/json", "x-opencode-directory": DIRECTORY}
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req) as resp:
-        raw = resp.read()
-        if expect_empty or not raw.strip():
-            return {}
-        return json.loads(raw)
-
-def wait_idle(session_id):
-    """poll session status until busy then idle, or timeout.
-
-    returns (ok, error) where error is the last error status seen, if any.
-    """
-    deadline = time.time() + POLL_TIMEOUT
-    saw_busy = False
-    last_error = None
+def _wait(pred, timeout_s):
+    """poll a predicate until true or the deadline passes."""
+    deadline = time.time() + timeout_s
     while time.time() < deadline:
-        statuses = api("GET", "/session/status")
-        status = statuses.get(session_id, {})
-        if status and status.get("type") != "idle":
-            saw_busy = True
-        if status and status.get("type") == "error":
-            last_error = status
-        if saw_busy and (not status or status.get("type") == "idle"):
-            return True, last_error
+        if pred():
+            return True
+        time.sleep(0.1)
+    return False
+
+def _model_ref(spec):
+    """'kairos/qwen3.5-9b:Q8_0' -> {'provider':'kairos','id':'qwen3.5-9b:Q8_0'} (split on first '/')."""
+    provider, _, bare = spec.partition("/")
+    return {"provider": provider, "id": bare}
+
+def _online_backend(client):
+    """the first online harness registered with the hub, or None."""
+    for h in client.request("harness.list"):
+        if h.get("online"):
+            return h
+    return None
+
+# --- interceptor auto-approval ---
+
+# persona gates SOUL/core-trait writes with an `ask`, which the harness raises as an hmux
+# interception (an elicitation for persona's own asks; a permission gate if a client armed
+# tool gating). the hub routes it to subscribed clients; the eval is that client and
+# approves each one so a turn never wedges. a turn that raises nothing makes this a no-op.
+
+def _approve_option(opts):
+    """the id of the approving choice for a select: prefer a session-wide yes, then any
+    yes/allow/approve/trust option, then the first."""
+    if not opts:
+        return None
+    label = lambda o: o.get("label") or o.get("id") or ""
+    for pat in (r"for this session", r"^(yes|allow|approve|trust)"):
+        for o in opts:
+            if re.search(pat, label(o), re.I):
+                return o.get("id")
+    return opts[0].get("id")
+
+def _elicit_answer(el):
+    """an ElicitAnswer approving/answering an elicitation of any kind."""
+    kind = el.get("kind")
+    if kind in ("select", "multiselect"):
+        chosen = _approve_option(el.get("options") or [])
+        return {"selected": [chosen] if chosen else []}
+    if kind == "confirm":
+        return {"confirmed": True}
+    if kind == "input":
+        return {"text": el.get("default") or ""}
+    return {}
+
+def resolve_pending(client, sid):
+    """approve every pending permission gate and answer every elicitation for the session.
+    idempotent by request id (continue == allow; a replace answers a question)."""
+    for _m, p in client.notifications("interceptor.request"):
+        if not p or p.get("session_id") != sid:
+            continue
+        rid = p.get("request_id")
+        if rid in _RESOLVED:
+            continue
+        hook = p.get("hook")
+        if hook == "permission":
+            decision = {"kind": "continue"}
+        elif hook == "elicitation":
+            el = (p.get("options") or {}).get("elicitation") or p.get("payload") or {}
+            decision = {"kind": "replace", "payload": _elicit_answer(el)}
+        else:
+            continue  # loop-internal mutation hooks are not armed by the eval
+        try:
+            client.request("interceptor.resolve", {"request_id": rid, "decision": decision})
+        except Exception:
+            pass
+        _RESOLVED.add(rid)
+
+def _status_events(client, sid):
+    """this session's status.changed params, in arrival order."""
+    return [p for (_m, p) in client.notifications("status.changed")
+            if p and p.get("session_id") == sid]
+
+def wait_turn(client, sid, since_status, timeout_s=None):
+    """drive one turn to completion: resolve interceptions as they arrive and return once
+    the session's status has gone processing -> idle (R16, authoritative). the status
+    slice starts at `since_status` so a later prompt on the same session is not tripped by
+    a previous turn's idle. returns True on completion, False on timeout.
+
+    `timeout_s` overrides PROMPT_TIMEOUT for a turn that is legitimately long (browsing)."""
+    deadline = time.time() + (timeout_s or PROMPT_TIMEOUT)
+    events_before = client.notification_count("session.event")
+    while time.time() < deadline:
+        resolve_pending(client, sid)
+        # runaway guard: a turn flooding tens of thousands of stream events is looping; abort
+        # it at once so its flood cannot exhaust memory, rather than waiting out PROMPT_TIMEOUT.
+        if client.notification_count("session.event") - events_before > RUNAWAY_MAX_EVENTS:
+            try:
+                client.request("session.abort", {"session_id": sid}, timeout=5)
+            except Exception:
+                pass
+            return False
+        st = _status_events(client, sid)[since_status:]
+        if any((s.get("status") or {}).get("state") == "processing" for s in st) \
+                and st and (st[-1].get("status") or {}).get("state") == "idle":
+            resolve_pending(client, sid)  # drain a gate raced with the idle transition
+            return True
         time.sleep(POLL_INTERVAL)
-    return False, last_error
+    return False
 
 # --- response parsing ---
 
 class Response:
-    """parsed LLM response with tool calls, text, reasoning, and full part history."""
-    def __init__(self, raw):
-        parts = raw.get("parts", [])
-        self.parts = parts
-        self.calls = []
-        for p in parts:
-            if p.get("type") == "tool":
-                s = p.get("state", {})
-                self.calls.append({
-                    "tool": p["tool"],
-                    "input": s.get("input", {}),
-                    "output": s.get("output", ""),
-                    "status": s.get("status", "unknown"),
-                })
-        self.text = "\n".join(
-            p.get("text", "") for p in parts if p.get("type") == "text")
-        self.reasoning = "\n".join(
-            p.get("text", "") for p in parts if p.get("type") == "reasoning")
+    """a turn's normalized result: tool calls, text, reasoning, and the raw events."""
+    def __init__(self, events):
+        # the same tool call streams pending->running->completed, so keep the last state
+        # per call id while preserving first-seen order.
+        calls, order = {}, []
+        text = reasoning = ""
+        for p in events:
+            ev = p.get("event", {})
+            kind = ev.get("type")
+            if kind == "tool_update":
+                tc = ev.get("tool_call", {})
+                cid = tc.get("id")
+                if cid not in calls:
+                    order.append(cid)
+                out = tc.get("output")
+                calls[cid] = {
+                    "tool": tc.get("name", ""),
+                    "input": tc.get("input") or {},
+                    "output": out if isinstance(out, str) else ("" if out is None else json.dumps(out)),
+                    "status": tc.get("status", "unknown"),
+                }
+            elif kind == "text_delta":
+                text += ev.get("delta", "")
+            elif kind == "reasoning_delta":
+                reasoning += ev.get("delta", "")
+        self.calls = [calls[c] for c in order]
+        self.text = text
+        self.reasoning = reasoning
+        self.parts = [p.get("event", {}) for p in events]  # raw events, for diagnostics
 
     @property
     def diag(self):
         return format_diagnostics(self.calls, self.text, self.reasoning, self.parts)
 
     def tool_output(self, index):
-        """parse JSON output of tool call at index."""
+        """parse the JSON output of the tool call at index."""
         raw = self.calls[index]["output"] if index < len(self.calls) else ""
-        if not raw:
-            return {}
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return {}
+        return parse_tool_output(raw)
 
 # --- assertion helpers ---
 
@@ -141,11 +254,15 @@ def format_diagnostics(calls, text, reasoning, parts=None):
     if text:
         lines.append(f"text: {text}")
     if reasoning:
-        lines.append(f"reasoning: {reasoning}")
+        # the FULL reasoning trace, so a turn that reasoned but never produced a final
+        # answer/tool (common on reasoning models at high thinking) is legible in the log.
+        lines.append(f"reasoning ({len(reasoning)} chars): {reasoning}")
     if parts:
-        lines.append(f"parts ({len(parts)}):")
-        for i, p in enumerate(parts):
-            lines.append(f"  [{i}] {json.dumps(p, ensure_ascii=False)}")
+        # a compact tally of the raw event stream, not a dump of every delta.
+        tally = {}
+        for p in parts:
+            tally[p.get("type", "?")] = tally.get(p.get("type", "?"), 0) + 1
+        lines.append("events: " + ", ".join(f"{k}x{n}" for k, n in sorted(tally.items())))
     return "\n".join(lines)
 
 def parse_tool_output(output):
@@ -307,49 +424,70 @@ def assert_text(r, pattern):
         f"expected text matching /{pattern}/i\n{r.diag}"
     )
 
-# --- session fixture ---
+# --- session fixtures ---
+
+@pytest.fixture(scope="session")
+def hub():
+    """the hub client, connected once and shared. waits for a backend to come online,
+    then hands control to send_prompt via the module _CLIENT."""
+    global _CLIENT
+    try:
+        client = HubClient(HUB_URL)
+    except Exception as e:
+        pytest.skip(f"hub unreachable at {HUB_URL}: {e}")
+    if not _wait(lambda: _online_backend(client) is not None, 30):
+        client.close()
+        pytest.skip("no hmux backend came online")
+    _CLIENT = client
+    yield client
+    _CLIENT = None
+    client.close()
 
 @pytest.fixture(scope="module")
-def session_id():
-    if not BASE_URL:
-        pytest.skip("OPENCODE_URL not set")
-    try:
-        api("GET", "/global/health")
-    except Exception as e:
-        pytest.skip(f"opencode server unreachable: {e}")
-    result = api("POST", "/session", {"title": f"persona-eval-{int(time.time())}"})
-    return result["id"]
+def session_id(hub):
+    """one session for the module, subscribed (so interceptions + status reach us) and
+    pinned to the model under test. tests share the on-disk workspace across turns."""
+    sid = hub.request("session.create", {"harness_id": None, "opts": {"agent": AGENT}})["id"]
+    hub.request("session.subscribe", {"session_id": sid, "since_seq": None})
+    if MODEL:
+        hub.request("session.set_model", {"session_id": sid, "model": _model_ref(MODEL)})
+    if REASONING:
+        try:  # non-reasoning models have no levels; leave them at default.
+            hub.request("session.set_reasoning", {"session_id": sid, "level": REASONING})
+        except Exception:
+            pass
+    return sid
 
 class SessionState:
-    msg_count = 0
+    pass  # retained for the send_prompt signature; per-turn state now lives in the events.
 
 @pytest.fixture(scope="module")
 def state():
     return SessionState()
 
-def send_prompt(session_id, state, text):
-    """send a prompt, wait for completion, return Response."""
-    body = {"agent": AGENT, "parts": [{"type": "text", "text": text}]}
-    if MODEL:
-        provider, model = MODEL.split("/", 1)
-        body["model"] = {"providerID": provider, "modelID": model}
-    msgs = api("GET", f"/session/{session_id}/message")
-    state.msg_count = len(msgs)
-    api("POST", f"/session/{session_id}/prompt_async", body, expect_empty=True)
-    ok, error = wait_idle(session_id)
-    assert ok, "timed out waiting for LLM response"
-    if error:
-        cause = error.get("error", error)
-        pytest.fail(f"server error: {json.dumps(cause, ensure_ascii=False)}")
-    msgs = api("GET", f"/session/{session_id}/message")
-    new_msgs = msgs[state.msg_count:]
-    parts = []
-    for msg in new_msgs:
-        if msg.get("info", {}).get("role") == "assistant":
-            parts.extend(msg.get("parts", []))
-    if not parts:
-        pytest.fail("server returned no assistant response (possible silent error)")
-    return Response({"parts": parts})
+def send_prompt(session_id, state, text, timeout_s=None):
+    """send a prompt, drive the turn to completion (auto-approving gates/questions), and
+    return the Response built from this turn's normalized events. a turn that yields no
+    tool call and no final text -- whether it TIMED OUT or REASONED WITHOUT CONCLUDING --
+    fails with the full diagnostics (reasoning trace + event tally included), so the log
+    always shows what the model actually did rather than a bare 'no response'."""
+    client = _CLIENT
+    ev_before = len(client.session_events(session_id))
+    st_before = len(_status_events(client, session_id))
+    client.request("session.prompt", {"session_id": session_id, "prompt": {"text": text, "files": []}})
+    done = wait_turn(client, session_id, st_before, timeout_s)
+    r = Response(client.session_events(session_id)[ev_before:])
+    if not done:
+        try:  # stop a runaway turn so it does not bleed into the next test on this session.
+            client.request("session.abort", {"session_id": session_id}, timeout=5)
+        except Exception:
+            pass
+        pytest.fail(f"timed out after {timeout_s or PROMPT_TIMEOUT}s (turn never finished)\n{r.diag}")
+    if not r.calls and not r.text.strip():
+        notices = [e.get("text", "") for e in r.parts if e.get("type") == "notice"]
+        note = f"; notices: {notices}" if notices else ""
+        pytest.fail(f"no final answer: turn produced no tool call and no text{note}\n{r.diag}")
+    return r
 
 # === eval tests ===
 
@@ -447,7 +585,7 @@ class TestCoreExpansion:
         assert_calls(r, [], also=[
             {"tool": "persona_trait_read", "args": {"trait": "AGENTS.md"}},
         ])
-        assert_text(r, r"(?i)evolve|bridge")
+        assert_text(r, r"(?i)hcp|bridge")
 
 # --- trait tools: create, list, read, edit, read, delete ---
 
@@ -616,8 +754,7 @@ class TestRecurringTask:
         ], also=[
             C("persona_data_query", args={"trait": ".tasks.json"}),
             C("persona_data_count", args={"trait": ".tasks.json"}),
-            C("evolve_datetime"),
-            C("glob"),
+            C("persona_datetime"),
             C("persona_trait_read", args={"trait": "poems.md"}),
             C("persona_trait_append", args={"trait": "poems.md"}, output={"success": True}),
         ])
@@ -734,15 +871,94 @@ class TestJournalLifecycle:
 
 # --- browser-use tools: start, navigate, extract, summarize ---
 
+# the bridge eval runs only when the harness wires a fake-matrix into the container's bridge
+# --- host-authored reminders (hmux phase 42) ---
+
+def inject_note(session_id, content):
+    """queue a host-authored note for the session's next turn.
+
+    the hub composes it into a `<system_reminder>` block ahead of the user's words -- the same
+    path a trait change or a recorded bridge send takes. any client may queue one; naming the
+    SPEAKER or the reply format is gated to allowlisted faces, so those two blocks are covered
+    by hmux's own e2e rather than here."""
+    _CLIENT.request("session.inject", {
+        "session_id": session_id, "content": content, "mode": "next_turn",
+    })
+
+
+class TestSystemReminders:
+    """what the reminders are FOR: the hub can put them in front of the model, but only the model
+    can honor them, and no unit test can show that it does.
+
+    the legend hmux appends to the system prompt makes three promises about a `<system_reminder>`
+    block -- read it, never reply to it, never reproduce it. one test each, plus the thing the
+    whole mechanism exists for: out-of-band news reaching a turn the user drove."""
+
+    def test_01_a_note_reaches_the_model(self, session_id, state):
+        # the point of the whole mechanism: something that happened OUTSIDE the conversation is
+        # known to the agent on its next turn, without the user having said it.
+        inject_note(session_id, "FYI: the nightly backup job failed at 02:14 with a disk error.")
+        r = send_prompt(session_id, state, "anything i should know about overnight?")
+        assert_text(r, r"(?i)backup")
+        assert_text(r, r"(?i)disk|02:14|fail")
+
+    def test_02_the_reminder_is_not_reproduced(self, session_id, state):
+        # the legend says never reproduce it. a model that echoes the block back shows a human
+        # raw markup they were never meant to see -- and on the bridge, sends it to matrix.
+        inject_note(session_id, "FYI: the disk was replaced and the backup succeeded on retry.")
+        r = send_prompt(session_id, state, "any update on that backup?")
+        for markup in ("<system_reminder>", "</system_reminder>", "system_reminder"):
+            assert markup not in r.text, (
+                f"the model reproduced host markup ({markup!r}) into its reply\n{r.diag}"
+            )
+
+    def test_03_the_note_is_not_answered_instead_of_the_user(self, session_id, state):
+        # the block rides INSIDE the user's turn (no provider takes a third role mid-conversation),
+        # so the failure mode is the model treating it as what the user said and answering it
+        # instead. the user's actual question must win.
+        inject_note(session_id, "FYI: the office wifi password rotated to `hunter2-2026`.")
+        r = send_prompt(session_id, state, "what is 17 times 3? just the number.")
+        assert_text(r, r"51")
+        assert "hunter2" not in r.text, (
+            f"the model answered the reminder instead of the user's question\n{r.diag}"
+        )
+
+
+# (`make eval-bridge` sets EVAL_BRIDGE here + HMUX_BRIDGE_* on the container). without it the bridge
+# idles and never registers its tools, so there is nothing for these to exercise.
+BRIDGE_ENABLED = bool(os.environ.get("EVAL_BRIDGE"))
+
+
+@pytest.mark.skipif(not BRIDGE_ENABLED, reason="bridge not wired into the eval (see `make eval-bridge`)")
+class TestBridgeMessaging:
+    """Per's matrix bridge: it can enumerate the rooms it is bridged into and message through them.
+    the harness points the container's bridge at a fake homeserver, so the sends are real (captured
+    by the fake) without touching a live matrix account."""
+
+    def test_01_list_rooms(self, session_id, state):
+        r = send_prompt(session_id, state, "which matrix chats are you connected to right now?")
+        assert_calls(r, [{"tool": "bridge_rooms"}])
+        assert_text(r, r"(?i)tester|dm|room|matrix")
+
+    def test_02_send_message(self, session_id, state):
+        r = send_prompt(session_id, state,
+            "let tester know on matrix that you'll be around this evening.")
+        assert_calls(r, [
+            C("bridge_send_direct", {"username": "tester"}) | C("bridge_send"),
+        ])
+
+
 class TestBrowserUse:
     def test_01_start_session(self, session_id, state):
-        r = send_prompt(session_id, state, "start a headless browser session now")
+        r = send_prompt(session_id, state, "start a headless browser session now",
+                        timeout_s=BROWSER_PROMPT_TIMEOUT)
         assert_bash_sequence(r, [
             r"browser-head start",
         ])
 
     def test_02_navigate_hackernews(self, session_id, state):
-        r = send_prompt(session_id, state, "go to https://news.ycombinator.com")
+        r = send_prompt(session_id, state, "go to https://news.ycombinator.com",
+                        timeout_s=BROWSER_PROMPT_TIMEOUT)
         assert_bash_sequence(r, [
             r"browser-use.*open.*https://news\.ycombinator\.com",
         ])
@@ -751,7 +967,8 @@ class TestBrowserUse:
         """extract links, visit 3 comment threads, summarize to a trait."""
         r = send_prompt(session_id, state,
             "visit the comment threads for the top 3 stories on the page. "
-            "for each one, write a one-paragraph summary of the discussion to the research_notes.md trait.")
+            "for each one, write a one-paragraph summary of the discussion to the research_notes.md trait.",
+            timeout_s=BROWSER_PROMPT_TIMEOUT)
         # LLM may navigate via click or open, so just check it used browser-use enough
         bash_calls = [c for c in r.calls if c["tool"] == "bash"
                       and "browser-use" in c["input"].get("command", "")]
@@ -765,7 +982,8 @@ class TestBrowserUse:
         )
 
     def test_04_cleanup(self, session_id, state):
-        r = send_prompt(session_id, state, "delete the research_notes.md trait")
+        r = send_prompt(session_id, state, "delete the research_notes.md trait",
+                        timeout_s=BROWSER_PROMPT_TIMEOUT)
         assert_calls(r, [
             {"tool": "persona_trait_delete", "args": {"trait": "research_notes.md"}, "output": {"success": True}},
         ])

@@ -1,0 +1,18 @@
+# keep the build context small and free of host secrets. the Dockerfile only COPYs
+# skills/, opencode/skills/, hmux/config.toml, workspace/, and docker-entrypoint.sh;
+# everything below is either irrelevant to the image or host-specific/secret.
+.git
+.gitignore
+.pytest_cache
+**/__pycache__
+# secrets + host-specific provider config (also gitignored); never bake into the image.
+persona.env
+models.json
+# host-side tooling: rewrites the host's persona.env and shells out to the hmux checkout beside
+# persona, neither of which exists in the image. everything under skills/ IS shipped.
+scripts
+# not needed at build time.
+evals
+*.md
+LICENSE
+.claude

@@ -4,76 +4,100 @@ the past is just a story we tell ourselves.
 
 persona (or "Per") is an AI agent akin to the Claw family but with humbler goals.
 
-it is built on top of [opencode-evolve](https://github.com/khimaros/opencode-evolve)
-which decouples it from OpenCode internals and gives it the ability to self-modify.
+it is built on HCP, a hook contract which decouples it from harness internals and gives
+it the ability to self-modify. hmux runs those hooks as its `hcp` face, so the same
+self-model composes across whichever harness is active.
 
-persona runs fully sandboxed in a VM or container with the help of Incus.
+persona runs fully sandboxed in a container, served by
+[hmux](https://github.com/khimaros/hmux) as its single control plane: one image drives
+`hmux up`, exposing a chat webui, a voice ui, and an opencode-compatible face for the tui.
+the harness underneath is pi (canonical) or opencode.
 
-the interface (webui and tui) are the stock OpenCode interfaces. all other OpenCode
-plugins, agents, and config are supported natively.
+persona has a heartbeat mechanism, a simple default SOUL.md, task tracking, and a journal.
 
-persona has a heartbeat mechanism, a simple default SOUL.md, task tracking, and a journal
+[TAXONOMY.md](TAXONOMY.md) maps every concept across the three layers -- HCP the protocol, hmux
+the host, persona the agent -- including which words mean different things in each.
 
-because it is built on OpenCode it supports most models and providers
-as well as most subscriptions (for now).
+it supports most models and providers as well as most subscriptions (for now).
 
 ## install
 
-assumes a base operating system of debian forky or later
+needs docker or podman (with the compose plugin).
 
-### install dependencies
+### build and run
 
-```
-make -C server bootstrap
-```
-
-### prepare the container
-
-assumes you have public keys in ~/.ssh/*.pub
-
-if not, run `ssh-keygen` first
+persona's image is `FROM khimaros/hmux`. get that base image first - pull it, or build it
+from the [hmux](https://github.com/khimaros/hmux) repo (`cd ../hmux && make image`). then
+build persona's image and start it:
 
 ```
-make -C server create
+make build
+make up
 ```
+
+use `make COMPOSE="podman compose" ...` for rootless podman.
+
+podman compose is the default and needs no edits. on docker, delete the `userns_mode` line in
+`docker-compose.yml` -- `keep-id` is a podman-only knob (it gives the container's `hmux` your
+host uid for headed browsing); docker maps the container user to your host uid directly.
+
+### configuring a deployment
+
+copy `persona.env.example` to `persona.env` (gitignored) and edit it. that file is everything
+the CONTAINER reads: api keys, the matrix bridge, the voice endpoint, and any `HMUX_CFG_*`
+override of a `hmux/config.toml` setting -- which reaches every knob in that file, including
+tables it does not mention, so a deployment should not need to edit the config itself.
+
+what compose decides BEFORE the container exists -- published ports, where `/work` and `/data`
+live, the uid -- cannot come from `persona.env`, because compose hands that file to the
+container only after deciding all of it. those live in `docker-compose.yml`, each with a
+comment; `/work` and `/data` have a commented host-directory alternative to the default volumes.
 
 ## model setup
 
-### hosted providers (oauth)
-
-*already have auth tokens in your main opencode installation?*
-
-push them to the virtual machine:
-
-```
-make -C server push-opencode-auth
-```
-
 ### custom providers
 
-you can talk to the **Admin** agent about custom providers:
+the compose mounts your `~/.pi/agent/{models.json,settings.json,auth.json}` read-only and
+the entrypoint copies them into the container (so providers, enabled models, defaults, and
+auth all carry over). prepare them as usual (e.g. with `llama-update-models` from
+[llama-tools](https://github.com/khimaros/llama-tools)). the provider host named in
+`models.json` must be reachable from the container: set it under `extra_hosts` in
+`docker-compose.yml` (or use `host.docker.internal`).
 
-> populate provider "llama-server" with models from http://localhost:7860/v1
+### hosted providers (oauth)
 
-under the hood this should run something like:
-
-```
-~/.config/opencode/skills/opencode-operate/scripts/update-opencode-models --api-base http://localhost:7860/v1
-```
+mount an existing `auth.json` into `/data/.local/share/opencode/`, or run the provider's
+device-code flow once against the persisted `/data` volume.
 
 ## attach
 
-### tui
-
-```
-make -C server tui
-```
-
 ### webui
 
+opens the chat ui at `http://localhost:4280/webui`. every ui hangs off the hub's single
+published port: the full renderer at `/webui`, a SIMPLIFIED chat ui -- sessions, a transcript
+and a prompt box, nothing else -- at `/chat`, and voice at `/omni`.
+
 ```
-make -C server webui
+make webui
 ```
+
+each face can also be published on a port of its own; the lines are in `docker-compose.yml`
+under `ports:`, commented out.
+
+### tui
+
+attaches an opencode tui to the opencode face. the opencode face has no hub mount, so this
+needs its `:4096` publish uncommented in `docker-compose.yml` first.
+
+```
+make tui
+```
+
+### voice
+
+the omni voice + text ui is at `http://localhost:4280/omni`. speech runs on the VOICE FACE, not
+in omni: set `HMUX_VOICE_URL` in `persona.env` (it falls back to `OPENAI_BASE_URL`), else the
+face idles and omni is text-only. see `persona.env.example`.
 
 ## chat
 
@@ -91,44 +115,65 @@ see also: [browser use](#browser-use)
 
 ### admin
 
-use the **Admin** agent for opencode and debian meta-administration:
+use the **Admin** agent for meta-administration:
 
 > run all system updates and summarize all of the changelogs
 
-> configure opencode server to listen on port 8080
+> configure the server to listen on port 8080
 
-### remote access
+### browser-use
 
-#### browser-use
-
-launch a headed browser for collaborative browsing:
-
-```
-make -C server browser-head
-```
-
-and then talk to the **Per** agent:
+browser-use runs headless in the container. the agent runs unprivileged (the whole stack drops to
+the `hmux` user; see [HMUX.md](HMUX.md)), so chrome keeps its sandbox while browsing the open web:
 
 > summarize the top 5 stories on hacker news
 
-### ssh
+for headed, collaborative browsing, run `make browser-head`: the container already has your host
+X11 socket + `$DISPLAY` (wired in `docker-compose.yml`), so this grants local X access and opens a
+real chrome window on your desktop -- the same instance the agent drives (you can watch, or take
+over to solve a captcha). it blocks until you close the window; `make browser-stop` closes the
+session from another shell. needs an X11 display on the host (a linux desktop, or xwayland under
+wayland) -- the container analog of the old VM's `ssh -X` path; with no reachable display it falls
+back to headless. VNC would be the remote / non-X11 alternative.
 
-launches a shared screen session
+### logs
 
 ```
-make -C server ssh
+make logs
 ```
 
-### console (logs)
-
-```
-make -C server console
-```
+or exec a shell: `docker compose exec persona bash`.
 
 ## operations
 
-### update (provision system and user)
+```
+make up            # start (detached)
+make down          # stop and remove
+make restart       # restart the container
+make build         # rebuild the persona image
+make browser-head  # open a headed chrome on your desktop (shared with the agent)
+make browser-stop  # close the shared browser session
+```
+
+## evals
+
+run the persona eval suite against the running container (a native client to the hmux hub
+on `:4280`):
 
 ```
-make -C server update
+make eval                       # full suite
+make eval FILTER=TestTrait      # only matching tests (pytest -k)
+make eval REPEAT=5              # repeat and aggregate flakiness
+make eval MODEL=kairos/ornith-1.0-35b:Q8_0   # pin a model (provider/id from models.json)
+make eval REASONING=high        # thinking level: off (default), low, medium, high
+make eval-bridge                # matrix-bridge tests against a throwaway fake homeserver
+make eval-browser               # browser-use tests (headless real browsing)
 ```
+
+`make eval` resets the container's `/work` to the baked workspace seed, runs it
+heartbeat-free, and drives `evals/persona_eval.py` as a native hub client over the
+`:4280/ws` api. `MODEL` pins the model under test (a `provider/id` from your
+`models.json`); `REASONING` sets the per-session thinking level -- `off` (default),
+`low`, `medium`, or `high`. off is the calibrated default: reasoning tends to make a
+model answer from its own reasoning rather than follow the injected persona
+instructions. `MODEL`/`REASONING` apply to `make eval-bridge` and `make eval-browser` too.

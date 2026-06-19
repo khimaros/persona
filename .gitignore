@@ -1,2 +1,4 @@
-server/opencode/persona.env
+persona.env
+.env
+models.json
 __pycache__/
