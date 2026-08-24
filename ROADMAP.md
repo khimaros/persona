@@ -86,6 +86,14 @@
     [x] mirror the publish tooling into hmux (`make publish`/`make login`/`make image`); hmux already had the OCI source label + .dockerignore
     [x] OCI image.source label so the ghcr package links back to the repo; description/licenses labels too
     [x] pin persona's pi extensions (pi-evolve 0.2.0, pi-permission-system 18.0.2, pi-messenger-bridge 0.4.0) so a rebuild does not drift from the base image's pi 0.80.2 (browser-use was already commit-pinned)
+    [x] README leads with GETTING STARTED off the published image (2026-08-24, user-raised): four
+        runtimes -- docker run, podman run, docker compose, podman compose -- each a copy-paste
+        recipe against docker.io/khimaros/persona:latest with no checkout and no build, then
+        "open the portal" (the hub root at :4280, its face list, fresh-session-on-launch) and the
+        trust_headers warning. the checkout is demoted to a "from a checkout" section (make
+        targets, `compose pull` for the published image, building). the compose snippet in the
+        README is standalone on purpose: docker-compose.yml carries a `build:` context, the X11
+        forwarding and the config mount, none of which a first run should have to have
     [ ] pin FROM khimaros/hmux to a published digest/version -- BLOCKED: hmux is local-only today (`:latest` is a moving tag, not in any registry). requires publishing hmux first, then persona rides a fixed base
     [ ] arm64 / multi-arch (needs an arm64 google-chrome deb + `docker buildx --platform`) -- wanted eventually, not urgent; amd64-only for now
     [ ] optional: github actions workflow to build+push on a version tag (docker/login-action + build-push-action)

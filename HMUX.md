@@ -125,6 +125,9 @@ running non-root restores chrome's sandbox for browsing (no `--no-sandbox`); the
 
 ## prerequisites
 
+only to BUILD. running persona needs nothing but the published `khimaros/persona:latest`
+(docker hub) and a container runtime; see the README's getting started.
+
 the base image `khimaros/hmux` (persona's image is FROM it) is built + published from the
 hmux repo (`cd ../hmux && make image`, or `make publish`), or pulled from a registry --
 persona does not build it. then `make build && make up`.
