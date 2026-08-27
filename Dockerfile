@@ -7,7 +7,7 @@
 #     cd ../hmux && make image
 #
 # nothing here can notice a stale base -- the copy below succeeds either way -- so a persona
-# release carrying a month-old webui looks exactly like a fresh one. (this comment named a
+# release carrying a month-old admin looks exactly like a fresh one. (this comment named a
 # `make image-browser` target that no longer exists, and following it published twice from an
 # old base before the difference was spotted in the image itself.)
 
@@ -68,6 +68,41 @@ RUN NODE_BIN="$(dirname "$(readlink -f /usr/local/bin/node)")" \
 # (the container analog of the old ssh -X path); browser-head falls back to headless when no
 # display is reachable.
 
+# A DISPLAY OF ITS OWN, so the browser Per drives is one somebody can WATCH -- the hmux canvas
+# face serves it through the hub's port (upstream phase 55). without this chrome is headless
+# anywhere but a developer's desktop, which makes the one instruction the browser-use skill gives
+# for a captcha ("STOP and ask the user to respond to the captcha") name something the user has no
+# way to do. the entrypoint starts it; see the display bootstrap there.
+#
+# AND A WINDOW MANAGER, which this said for a release it did not need. the old reasoning is worth
+# keeping because it was true of the display and false of the PRODUCT: "chrome draws its own window
+# furniture and nothing on this display needs moving, resizing or focusing between apps, so a wm
+# would be a second process to supervise in exchange for no pixels."
+# what it missed is that the display is not for the machine, it is for the PERSON AT /canvas. with
+# no wm, chrome opens wherever it asked to and stays there for the life of the container: the
+# person who took the mouse can use the page and nothing around it, an app that opens a second
+# window has it land on top of the first with no way to separate them, and a browser sized like a
+# phone cannot be expressed at all, since reshaping a window somebody else mapped is precisely what
+# a window manager is for.
+#
+# JWM AND NOT OPENBOX, measured rather than assumed: openbox pulls 29 packages and 64MB (imlib2
+# drags ghostscript in), and defaults to click-to-focus. jwm is 3 packages and 1.4MB, one 260KB
+# binary, one readable config, and its focus model is already the one this display needs -- see
+# display/jwmrc, where the reason is spelled out.
+#
+# x11-utils IS FOR `xdpyinfo` -- one binary, used once at boot to ask whether a forwarded $DISPLAY
+# actually ANSWERS before deferring to it. that question cannot be answered by looking: a
+# bind-mounted /tmp/.X11-unix carries the host's socket FILES but not its abstract sockets, so a
+# desktop's X0 is present, refuses connections, and looks exactly like a working one.
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb x11-utils jwm \
+ && rm -rf /var/lib/apt/lists/*
+
+# PARSED AT BUILD TIME. `jwm -p` reads the config and exits without needing a display, so a typo
+# that would leave the canvas unmanaged fails the build here rather than at boot in a container
+# nobody is looking at -- where it degrades quietly, into exactly the behaviour we just left.
+COPY display/jwmrc /etc/persona/jwmrc
+RUN jwm -p -f /etc/persona/jwmrc
+
 # skills: common (both backends) + opencode-specific, baked read-only; the entrypoint links
 # them into the per-backend skill dirs under /data (a volume) at runtime. everything here is
 # runnable by the agent -- host-side operator tooling lives in scripts/, which never ships.
@@ -100,7 +135,7 @@ WORKDIR /work
 # a default (`: "${HOME:=/data}"`) can never fire: a container runtime always sets HOME, so it was
 # silently staying /root and pi would have looked for its auth in the wrong place.
 ENV HOME=/data
-# hub, webui, omni, opencode face, openai face (published as needed).
+# hub, admin, omni, opencode face, openai face (published as needed).
 EXPOSE 4280 4282 4284 4096 4286
 
 # keep tini as PID1 (from the base), run persona's setup, then exec the CMD.

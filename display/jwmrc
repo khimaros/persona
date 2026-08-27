@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<!--
+  the window manager for persona's own display, the one the canvas face serves.
+
+  THIS IS NOT A DESKTOP. nobody sits at this screen; it is watched through /canvas by whoever the
+  agent asked for help, and every pixel drawn here is captured, encoded and sent to them. so there
+  is no tray, no pager, no root menu and one desktop: furniture nobody asked for would be furniture
+  streamed forever, and a second desktop is somewhere a window can be lost where the person
+  watching cannot reach it.
+
+  WHAT IT IS FOR is the part that was missing: a titlebar to drag, a border to resize, and buttons
+  to maximize or close. chrome came up wherever it asked to and stayed there, which made the shared
+  screen a page you could use and nothing around it.
+
+  the colours are the admin's own palette (clients/admin/public/styles.css), because this furniture
+  is ours -- it is drawn by us, into a picture shown inside our ui -- and matching it makes the
+  canvas read as part of the product rather than as a foreign desktop.
+-->
+<JWM>
+
+    <!-- ONE DESKTOP. see above: a second one is a place to lose a window. -->
+    <Desktops width="1" height="1">
+        <Background type="solid">#0d0d0d</Background>
+    </Desktops>
+
+    <WindowStyle decorations="flat">
+        <Font>Sans-11</Font>
+        <Width>3</Width>
+        <Height>22</Height>
+        <Corner>0</Corner>
+        <Foreground>#807a70</Foreground>
+        <Background>#141414</Background>
+        <Outline>#242424</Outline>
+        <Active>
+            <Foreground>#e0dccf</Foreground>
+            <Background>#242424</Background>
+            <Outline>#d97757</Outline>
+        </Active>
+    </WindowStyle>
+
+    <!-- the popup that names a truncated title: it is drawn on the shared screen too. -->
+    <PopupStyle>
+        <Font>Sans-11</Font>
+        <Foreground>#e0dccf</Foreground>
+        <Background>#242424</Background>
+    </PopupStyle>
+
+    <!-- SLOPPY, AND THIS ONE IS LOAD-BEARING. XTEST delivers a keystroke to whatever holds focus,
+         and with no window manager at all focus is PointerRoot -- the window under the pointer --
+         which is the rule the canvas's input path has always been written against. click-to-focus
+         would change that rule underneath it: a viewer that moved the pointer over the page and
+         typed would have its keys delivered somewhere else entirely. -->
+    <FocusModel>sloppy</FocusModel>
+
+    <!-- OPAQUE, because the canvas sends jpegs of what is on the screen. an outline drag draws an
+         xor rectangle that damage reports and the encoder faithfully ships as a smear; moving the
+         real window is both what the watcher wants to see and the cheaper thing to encode. -->
+    <MoveMode>opaque</MoveMode>
+    <ResizeMode>opaque</ResizeMode>
+
+    <SnapMode distance="10">border</SnapMode>
+    <DoubleClickSpeed>400</DoubleClickSpeed>
+    <DoubleClickDelta>2</DoubleClickDelta>
+
+    <!-- MOUSE ONLY, NO KEY BINDINGS AT ALL. every <Key> is an X grab, and a grab takes that key
+         away from the window underneath for good -- including from the agent, which types through
+         the same XTEST path a person does. a stray alt+F4 grab on a shared screen closes the
+         browser somebody is working in. -->
+    <Mouse context="title" button="1">move</Mouse>
+    <Mouse context="title" button="3">window</Mouse>
+    <Mouse context="title" button="11">maximize</Mouse>
+    <Mouse context="border" button="1">resize</Mouse>
+    <Mouse context="border" button="2">move</Mouse>
+    <Mouse context="border" button="3">window</Mouse>
+    <Mouse context="icon" button="1">window</Mouse>
+    <Mouse context="close" button="-1">close</Mouse>
+    <Mouse context="maximize" button="-1">maximize</Mouse>
+    <Mouse context="minimize" button="-1">minimize</Mouse>
+
+</JWM>

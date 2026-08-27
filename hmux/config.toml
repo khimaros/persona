@@ -1,152 +1,112 @@
-# the hmux `up` profile persona runs (mounted to /config/config.toml). the hub binds
-# 0.0.0.0 so a published container port reaches it; the faces bind 0.0.0.0 via the base
-# image's HMUX_LISTEN_HOST, and their host ports are mapped in docker-compose.yml.
-
 hub = "0.0.0.0:4280"
 
-# pi canonical. opencode is optional. the `clients` ORDER is the mutation-hook composition
-# priority; with one mutation face (hcp) the order is moot. clients use the array-of-tables
-# form here so the permission policy can be written as readable nested tables.
 [profile.persona]
-backends = ["pi"]
-cwd      = "/work"
+harnesses = ["pi"]
+cwd = "/work"
+expose = { admin = "/admin", chat = "/chat", "omni" = "/omni", voice = "/voice", touch = "/touch", canvas = "/canvas" }
 
-# reach every face through the single published hub port (:4280) at a path of your choosing,
-# instead of one host port per face: http://<host>:4280/webui (the full ui), /chat (the
-# simplified one), /omni (voice), /opencode
-# (tui face). the mount is the OPERATOR's choice and independent of the face kind. the hub
-# reverse-proxies each once it connects; `/ws` is reserved by the hub. once live,
-# docker-compose.yml can drop the per-face 4282/4284/4096 publishes.
-expose = { webui = "/webui", chat = "/chat", omni = "/omni", voice = "/voice", touch = "/touch" }
-
-# persona operates entirely through its persona_*/hcp_* tools, so NONE of pi's generic builtins
-# (bash, edit, find, grep, ls, read, write) reach the model. list names here to enable a subset;
-# omit this table to expose all builtins (the default).
-[profile.persona.backend.pi]
+[profile.persona.harness.pi]
 builtin_tools = ["read", "find", "ls", "grep", "bash"]
-# pi truncates long bash output to a file and tells the agent to read it back, choosing the path
-# with node's `os.tmpdir()` -- so a directory here is a directory it uses. it keeps those files
-# somewhere the permission policy can name as a PLACE (`/tmp/pi-output/**`) instead of a prefix
-# (`/tmp/pi-*`), which admitted anything in /tmp that happened to start with those characters.
-# hmux creates it before the backend starts.
 scratch_dir = "/tmp/pi-output"
+[profile.persona.harness.opencode]
+builtin_tools = ["read", "grep", "glob", "bash"]
 
-# the same gate for the opencode backend (hides non-listed builtins from the model via the hmux
-# opencode plugin's config hook). INERT while persona is pi-only (backends = ["pi"]); it only takes
-# effect if opencode joins `backends`. kept in sync with pi's list so a backend switch is seamless.
-#[profile.persona.backend.opencode]
-#builtin_tools = ["read", "grep", "glob", "bash"]
+[profile.persona.identity]
+trust_headers = true
+single_user = true
+single_user_name = "human"
+single_user_display_name = "Human"
+ask_only_the_speaker = false
 
-# the hcp face: prompt composition, persona's tools, and the host-owned heartbeat (30 min
-# default cadence, `per` agent, fresh session/beat). Per can retune/disable it via hcp_heartbeat_set
-# (persisted under /work/.hcp/); HMUX_HCP_HEARTBEAT_ENABLED=false force-disables it (eval/demo).
-[[profile.persona.clients]]
+[[profile.persona.faces]]
+kind = "admin"
+
+[[profile.persona.faces]]
+kind = "chat"
+
+[[profile.persona.faces]]
+kind = "omni"
+
+[[profile.persona.faces]]
+kind = "touch"
+
+[[profile.persona.faces]]
+kind = "voice"
+
+[[profile.persona.faces]]
+kind = "canvas"
+
+[[profile.persona.faces]]
+kind = "opencode"
+
+[[profile.persona.faces]]
 kind = "hcp"
 heartbeat_agent = "per"
 heartbeat_cleanup = "new"
 heartbeat_cleanup_count = 100
 heartbeat_every_secs = 1800
-# how persona.py's tools are advertised. `add` keeps every tool callable by name AND adds the
-# hcp_tool_list / hcp_tool_invoke pair; `only` would replace the forty-odd names with just the pair,
-# which is the context saving but changes how every turn is composed -- worth an eval against the
-# model in use before it decides anything real, so it stays off.
-# `add` is on for the reason below, not for the saving: MEASURED on pi, a tool re-registered
-# mid-run does NOT reach an already-running session's tool array, so the dispatcher is the only
-# route by which a tool Per just wrote is callable in the session that wrote it.
-dynamic_tools = "add"
-# re-discover Per's tools after it edits persona.py, so a tool it just wrote is usable at once
-# instead of after a restart, and hcp_tool_list then reports what was ADDED rather than the whole
-# catalogue. a SEPARATE knob from dynamic_tools: this is about the tool set being current, that one
-# about how it is advertised.
+#dynamic_tools = "add"
 reload_tools = true
 
-# the matrix bridge face. homeserver/user/token come
-# from HMUX_BRIDGE_HOMESERVER / HMUX_BRIDGE_USER_ID / HMUX_BRIDGE_ACCESS_TOKEN (compose env); unset -> it idles.
-# cleanup/cleanup_tokens (compact bridged sessions past 100k tokens) migrated here from the retired
-# workspace/config/bridge.jsonc, which nothing read anymore.
-# DECLARED rather than commented: an unconfigured bridge idles instead of failing, so shipping it
-# on costs a deployment that does not want matrix nothing, and saves one that does an edit to a
-# file it would then have to keep merging.
-[[profile.persona.clients]]
+[[profile.persona.faces]]
 kind = "bridge"
 bridge = { agent = "per", default_trigger = "mention", cleanup = "compact", cleanup_tokens = 100000 }
 
-# the hmux-native permission face. it arms the hub's
-# permission gate; each tool call is decided by the policy below -- allow -> run, deny -> block,
-# ask -> defer to a human (webui prompt / bridge->matrix / the eval auto-approves), else fail closed.
-# this policy is the SINGLE SOURCE OF TRUTH for persona's tool gating (per-tool + arg-keyed + bash
-# rules); the opencode `per.md` agent no longer carries its own tools/permission blocks.
-# NOTE: the read/external PATHS are the /work workspace layout + pi's config dirs -- verify against
-# pi's actual path args when read/bash-file tools are exercised.
-[[profile.persona.clients]]
+[[profile.persona.faces]]
+kind = "federation"
+[profile.persona.faces.federation]
+name = "perseus"
+substrates = ["veilid", "https"]
+tools = "manage"
+verify = "tofu"
+
+[[profile.persona.faces]]
 kind = "permission"
-# expose permission_list / permission_set / permission_delete, so Per can read this policy and widen
-# or narrow it for the rest of the run (in memory -- a restart restores this file). they ASK unless
-# a rule below names them, and no rule set THROUGH them may decide them. STAGED, not on: turning it
-# on means every policy question becomes a prompt someone has to answer.
 #tools = true
-
-[profile.persona.clients.permission]
+[profile.persona.faces.permission]
 default = "deny"
-
-[profile.persona.clients.permission.tools]
-# persona's own tools + the bridge tools run; the hcp face builtins run except hook edits ask.
+[profile.persona.faces.permission.tools]
 "persona_*"            = "allow"
-# a SECOND hook takes its tool prefix from its filename (/work/hooks/foo.py -> foo_*), so a
-# deployment that adds one names the prefix here or every one of its tools falls through to
-# `default = "deny"`.
-#"foo_*"                = "allow"
 "bridge_*"             = "allow"
 "hcp_*"                = "allow"
 "touch_*"              = "allow"
-"hcp_hook_write"       = "ask"       # hook script edits prompt
-"hcp_hook_edit"        = "ask"       # ... and the find-and-replace form is the same edit
+"canvas_*"             = "allow"
+"federation_peers"     = "allow"
+"federation_task"      = "allow"
+"federation_ask"       = "ask"
+"federation_invite"    = "ask"
+"federation_pair"      = "ask"
+"federation_verify"    = "ask"
+"federation_unpair"    = "ask"
+"hcp_hook_write"       = "ask"
+"hcp_hook_edit"        = "ask"
 "persona_prompt_write" = "ask"
 "persona_prompt_edit"  = "ask"
 "glob"  = "allow"
 "grep"  = "allow"
 "find" = "allow"
 "ls" = "allow"
-#"skill" = "allow"
-
-[profile.persona.clients.permission.tools.read]
-# read only from a small allow-list of paths (matched on the read tool's path arg). the face is
-# given the profile cwd, so a RELATIVE argument is resolved against /work before matching -- pi's
-# read takes "relative or absolute" and Per writes the relative form, so `tests/persona_test.py`
-# and `/work/tests/persona_test.py` are the same file to these rules (a `..` escape is collapsed
-# first, then refused).
+[profile.persona.faces.permission.tools.read]
 "*" = "deny"
 "/work/config/*" = "allow"
-# the HOOK TESTS, deliberately: a hook declares its own test (persona.py -> tests/persona_test.py),
-# every hcp_hook_write/edit is validated against it, and Per is told to read it before editing --
-# which it cannot do if the file it is being judged by is unreadable.
 "/work/tests/*" = "allow"
 "~/.pi/agent/**" = "allow"
 "/tmp/pi-output/**" = "allow"
-
-# arg-keyed: any trait edits freely EXCEPT SOUL.md, which asks (per.md's core-trait gate).
-[profile.persona.clients.permission.tools.persona_trait_edit]
+[profile.persona.faces.permission.tools.persona_trait_edit]
 "*" = "allow"
 "SOUL.md" = "ask"
-[profile.persona.clients.permission.tools.persona_trait_write]
+[profile.persona.faces.permission.tools.persona_trait_write]
 "*" = "allow"
 "SOUL.md" = "ask"
-[profile.persona.clients.permission.tools.persona_trait_append]
+[profile.persona.faces.permission.tools.persona_trait_append]
 "*" = "allow"
 "SOUL.md" = "ask"
-[profile.persona.clients.permission.tools.persona_trait_delete]
+[profile.persona.faces.permission.tools.persona_trait_delete]
 "*" = "allow"
 "SOUL.md" = "ask"
-
-# bash: deny by default; allow the test runner + a curated browser-use surface (browser-head
-# manages session startup). the splitter IS quote-aware, so a separator inside a quoted argument is
-# not treated as one; what it cannot see through are `bash -c`, `$(...)` and backticks, which ask.
-[profile.persona.clients.permission.bash]
+[profile.persona.faces.permission.bash]
 "*" = "deny"
 "/work/tests/*"        = "allow"
-# read-only filters + sleep, so the model's piped/compound browser-use probes are not denied
-# (a pipe or `&&` splits into segments; each must be allowed or the most-restrictive wins -- and a
-# denial now names the segment and the rule, so a refusal says which part it objected to).
 "head *"               = "allow"
 "grep *"               = "allow"
 "sleep *"              = "allow"
@@ -177,63 +137,10 @@ default = "deny"
 "browser-use tab *"       = "allow"
 "browser-use tab close *" = "ask"
 "browser-use open *"      = "allow"
-
-# file access outside cwd: deny except the workspace + pi config/output dirs.
-#
-# BOTH LISTS HAVE TO NAME A PATH. an absolute path arg is checked against `tools.<name>` AND
-# overlaid with this allow-list, most-restrictive-wins -- so a path named in one and not the other
-# is refused. `/tmp/pi-*` was in `tools.read` alone, and the agent could not read back its own
-# truncated bash output ("permission denied by policy: read" on the very file it was told to open).
-# it is a DIRECTORY, not a name prefix: pi is given `/tmp/pi-output` as its own scratch dir
-# (`scratch_dir` above exports it as TMPDIR), so the policy admits a place rather than everything
-# in /tmp that happens to begin with the right characters.
-[profile.persona.clients.permission.external]
+[profile.persona.faces.permission.external]
 "*" = "deny"
 "/work/**" = "allow"
 "~/.pi/agent/**" = "allow"
 "/tmp/pi-output/**" = "allow"
-
-[[profile.persona.clients]]
-kind = "webui"
-
-# the simplified chat ui at /chat: sessions, a transcript and a prompt box. the webui above is
-# the full renderer (tools, thinking, permission prompts); this is the plain surface.
-[[profile.persona.clients]]
-kind = "chat"
-
-[[profile.persona.clients]]
-kind = "omni"
-
-# the ambient display at /touch, and the face that keeps the room it draws. TWO JOBS IN ONE
-# PROCESS: it serves the flutter bundle, and it registers the touch_room_describe /
-# touch_prop_add / touch_prop_remove tools so Per can furnish the room it lives in. what it adds
-# is kept under the profile's state dir and survives restarts.
-[[profile.persona.clients]]
-kind = "touch"
-
-# the voice face: server-side stt/tts, so a client carries only a mic, a speaker and a local VAD.
-# omni above relays to it and runs no speech of its own. endpoint + models come from HMUX_VOICE_*
-# in persona.env (falling back to the ambient OPENAI_BASE_URL / OPENAI_API_KEY). unset, the face
-# IDLES (connected, serving no speech) rather than taking the stack down; a wrong model name is
-# likewise safe -- the face starts and reports the failure per turn rather than dying.
-[[profile.persona.clients]]
-kind = "voice"
-
-[[profile.persona.clients]]
-kind = "opencode"
-
-# who the hub believes is speaking. persona TRUSTS the identity every configured ingress reports:
-# the front door's headers (`trust_headers`, read from the `source` preset -- ssowat/yunohost,
-# which strips inbound ynh_* headers before injecting its own) and the faces in `declare_allowed`,
-# which authenticate their own humans and so cannot carry one identity per connection. hmux ships
-# `trust_headers` OFF; persona turns it on because a persona is a thing PEOPLE talk to, and one
-# that cannot tell them apart addresses everyone as its single human.
-#
-# WHAT THIS ASSUMES: that nothing reaches the hub except through that front door. hmux has no auth
-# of its own, so on a directly-reachable hub these headers are just headers the caller chose --
-# anyone who can dial the port can claim to be anyone, and Per keeps per-person notes and messages.
-# publish :4280 to a proxy that authenticates and strips, or a private interface. a deployment that
-# cannot promise that turns it back off, here or from persona.env:
-#   HMUX_CFG_profile__persona__identity__trust_headers=false
-[profile.persona.identity]
-trust_headers = true
+[profile.persona.faces.permission.identity.federation]
+default = "deny"

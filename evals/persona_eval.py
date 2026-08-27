@@ -437,7 +437,7 @@ def hub():
         pytest.skip(f"hub unreachable at {HUB_URL}: {e}")
     if not _wait(lambda: _online_backend(client) is not None, 30):
         client.close()
-        pytest.skip("no hmux backend came online")
+        pytest.skip("no hmux harness came online")
     _CLIENT = client
     yield client
     _CLIENT = None

@@ -2,7 +2,7 @@
 
 persona's serving/control plane is hmux, deployed as one container. pi is canonical,
 opencode optional. the hmux `hcp` FACE is a hub-client host
-(`hmux client hcp --cwd /work`) that arms hmux's interception hooks and drives persona's
+(`hmux face hcp --cwd /work`) that arms hmux's interception hooks and drives persona's
 hook script (`/work/hooks/persona.py`, the HCP v3 contract), giving persona its prompt
 composition, tools, and heartbeat across whichever backend is active. persona.py plus the
 workspace ARE the hook implementation; hmux is the host. the three names are HCP (the
@@ -16,7 +16,7 @@ those files are the source of truth.
 
 `hmux up persona` starts the hub (auto), the pi backend, and seven faces: `hcp` (prompt
 composition + tools + heartbeat), `bridge` (matrix), `permission` (the tool-call gate),
-`webui` (the full browser ui), `chat` (the simplified one), `omni`, and `opencode`.
+`admin` (the full browser ui), `chat` (the simplified one), `omni`, and `opencode`.
 
 - the `hcp` face connects to the hub as a CLIENT, runs `discover` on the hook script, and
   arms hmux's system-prompt hook -- it composes the prompt from persona's SOUL + traits +
@@ -38,7 +38,7 @@ composition + tools + heartbeat), `bridge` (matrix), `permission` (the tool-call
   `hcp_heartbeat_status` / `hcp_heartbeat_history` -- those changes persist under `/work/.hcp/` and
   survive a restart. set `HMUX_HCP_HEARTBEAT_ENABLED=false` (compose env) to force it off for eval/demo.
   the hook only returns the beat's prompt when fired; it declares nothing about scheduling.
-- the `bridge` face (`hmux client bridge`) mirrors a hub session per matrix room and relays replies,
+- the `bridge` face (`hmux face bridge`) mirrors a hub session per matrix room and relays replies,
   replacing the pi-messenger-bridge extension. it is matrix-sdk native (real E2E, unlike the old
   hand-rolled sync), reads its behavior from the `bridge` client table in `hmux/config.toml`, and
   takes the homeserver / user / access token from `HMUX_BRIDGE_*` compose env (unset -> the face idles,
@@ -47,10 +47,10 @@ composition + tools + heartbeat), `bridge` (matrix), `permission` (the tool-call
   bridged sessions. durable state (the matrix e2e store + room<->session map) lives under
   `/work/.hcp/bridge/`. it also relays a deferred permission ask to the room (a whitelisted
   `permission_users` member replies allow/deny), resolving the gate over matrix.
-- the `permission` face (`hmux client permission`) is the hmux-native tool-call gate, replacing the
+- the `permission` face (`hmux face permission`) is the hmux-native tool-call gate, replacing the
   @gotgenes/pi-permission-system extension. it arms the hub's permission hook and decides each tool
   call from the policy in the `permission` client table (`default` + per-tool + `bash`/`mcp`/`skill`/
-  `external` rules): allow runs it, deny blocks it, ask DEFERS to a human (webui prompt / bridge ->
+  `external` rules): allow runs it, deny blocks it, ask DEFERS to a human (admin prompt / bridge ->
   matrix / eval), else fails closed. the hub turned its permission gate into a PLUGGABLE priority
   chain (a policy client decides or defers; humans are the fallback), so a different permission
   system is just a different client arming the hook. persona's initial policy is autonomy-safe
@@ -68,13 +68,13 @@ in `docker-compose.yml` if a port is taken.
 | role          | port (container = published) | through the hub port |
 |---------------|------------------------------|----------------------|
 | hub           | 4280                         | --                   |
-| chat webui    | 4282                         | `/webui`             |
+| admin         | 4282                         | `/admin`             |
 | simple chat   | 4290                         | `/chat`              |
 | voice omni    | 4284                         | `/omni`              |
 | voice face    | 4288                         | `/voice` (ws only)   |
 | opencode face | 4096                         | --                   |
 
-the webui rewrites the wildcard hub host to the page host so the browser dials the right
+the admin rewrites the wildcard hub host to the page host so the browser dials the right
 place (hmux 33b). the eval is a native hub client on 4280; the opencode face on 4096 serves
 the tui (`opencode attach`).
 
@@ -102,7 +102,7 @@ spawns `npm` on session start.
 
 ## unprivileged runtime
 
-the whole agent -- the pi backend, the hcp/bridge/permission/webui/omni/opencode faces, any bash it
+the whole agent -- the pi backend, the hcp/bridge/permission/admin/omni/opencode faces, any bash it
 runs, and chrome -- runs as the unprivileged `hmux` user (uid 1000), not root. the base image
 (`../hmux`, 33e) creates that user and ships `/usr/local/bin/hmux-drop`, an entrypoint that works two
 ways depending on how the container is started (persona's `docker-entrypoint.sh` does its own setup
@@ -160,8 +160,8 @@ host now. hmux is the one front door via `docker compose`.
 
 1. (base image present) `make build && make up`; `make logs` shows hub + pi backend + faces
    up and the `hcp face: arming` line (persona hooks loaded).
-2. webui: `make webui` (http://localhost:4280/webui) -> chat with Per; SOUL/traits in context,
-   trait_*/task_* tools work, a core-trait edit prompts permission in the webui.
+2. admin: `make admin` (http://localhost:4280/admin) -> chat with Per; SOUL/traits in context,
+   trait_*/task_* tools work, a core-trait edit prompts permission in the admin.
 3. tui: `make tui` (opencode attach http://localhost:4096) -> same session visible (R7).
 4. omni: http://localhost:4284 -> voice round-trip (with HMUX_VOICE_URL set).
 5. eval: `make eval` -> suite green (a native hub client on :4280/ws drives session

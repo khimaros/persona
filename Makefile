@@ -1,5 +1,5 @@
 # persona runs as a single container: a thin image FROM khimaros/hmux:browser driving `hmux
-# up persona` (pi backend + webui/omni/opencode faces). see HMUX.md.
+# up persona` (pi backend + admin/omni/opencode faces). see HMUX.md.
 
 # docker or podman; override e.g. `make COMPOSE="podman compose" up`.
 COMPOSE ?= docker compose
@@ -114,7 +114,7 @@ login:
 # a push draws 2.5-4.8 -- but it is real, and the pushes below run concurrently precisely so the
 # mirror costs wall-clock time only when it is asked for. `make publish PUSH_GHCR=1` includes it,
 # which is worth doing on a release someone might actually pull from ghcr, since it is stale.
-# where the hmux base image is built from. persona's payload (hub, faces, webui, hub-client, omni)
+# where the hmux base image is built from. persona's payload (hub, faces, admin, hub-client, omni)
 # all comes from there, and `docker build` CANNOT NOTICE a stale one -- the COPY succeeds either
 # way -- so a publish silently ships a month-old client and looks exactly like a fresh one. that has
 # happened; see the Dockerfile header.
@@ -151,9 +151,9 @@ publish: image
 # --- attach ---
 
 # through the hub port, the only one published. PERSONA_HUB_PORT matches the compose publish.
-webui:
-	open http://localhost:$(or $(PERSONA_HUB_PORT),4280)/webui
-.PHONY: webui
+admin:
+	open http://localhost:$(or $(PERSONA_HUB_PORT),4280)/admin
+.PHONY: admin
 
 # the opencode face is NOT published by default and has no `expose` mount, so this needs the
 # 4096 line in docker-compose.yml uncommented first (then `make down && make up`).
@@ -188,10 +188,15 @@ browser-stop:
 # permission policy is checked against the real config.toml -- a path named in `tools` but not in
 # `external` is refused at runtime, which is not visible by reading either list alone. the defaults
 # test guards the other half: what a deployment must NOT have to edit, and what it must opt into.
+# the display test is the only one here with an ARTIFACT half: it runs the built image and asks the
+# window manager whether it is really managing the canvas display. that half SKIPS (loudly, in the
+# summary line) when the image predates the Dockerfile, so `make test` on an unbuilt tree is honest
+# rather than either red or falsely green.
 test:
 	python3 workspace/tests/persona_test.py
 	python3 tests/permission_policy_test.py
 	python3 tests/config_defaults_test.py
+	python3 tests/display_test.py
 .PHONY: test
 
 # run the eval heartbeat-free against the hmux hub (persona_eval.py is a native hub client).

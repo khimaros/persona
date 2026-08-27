@@ -142,7 +142,11 @@ class HubClient:
     """a hub client: the hello/welcome handshake, json-rpc 2.0 request/response
     correlation, and fanned-out notifications collected by a background reader."""
 
-    def __init__(self, ws_url, role="client", handshake_timeout=10):
+    # THE ROLE IS `face`, NOT `client` (hmux roadmap 60e). `PeerRole` is `harness | face`; a
+    # hello carrying a role the hub does not know is REFUSED -- and a refused hello presents as a
+    # HANG, not an error, because the client sits waiting for a welcome that never comes. so a
+    # stale value here reads as "the hub is slow" for the full handshake timeout.
+    def __init__(self, ws_url, role="face", handshake_timeout=10):
         host, port, path = _split_ws(ws_url)
         self.ws = _WS(host, port, path)
         # hello + welcome are raw json frames; everything after is json-rpc.

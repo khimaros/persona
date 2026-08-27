@@ -69,10 +69,22 @@ cmd_start() {
   # crashes), so point shared memory at /tmp instead -- a container constraint, harmless anywhere, so
   # always on. we run UNPRIVILEGED (the persona container drops to the hmux user via hmux-drop), so
   # chrome keeps its sandbox: no --no-sandbox. global so _launch_chrome sees it.
+  # --no-first-run IS WHAT MAKES HEADED WORK AT ALL, and its absence is why this fell back to
+  # headless every single time on a fresh profile. a headed chrome with no profile opens the
+  # "Google Chrome and ChromeOS Additional Terms of Service" dialog first, and until that dialog is
+  # answered IT DOES NOT OPEN THE REMOTE DEBUGGING PORT -- so `browser-use connect` never succeeds,
+  # `_launch_chrome` gives up, and the fallback below runs. MEASURED in the persona container
+  # against a real Xvfb: plain headed never accepted a CDP connection in 40s; with these two flags
+  # it accepted one in 1s.
+  # it never showed up in headless because chrome passes --no-first-run to ITSELF there (visible in
+  # the process args of a headless launch), which is exactly why the headed path was the only one
+  # broken and the fallback hid it.
   CHROME_BASE_ARGS=(
     --user-data-dir="${CHROME_PROFILE}"
     --remote-debugging-port="${DEBUG_PORT}"
     --disable-dev-shm-usage
+    --no-first-run
+    --no-default-browser-check
   )
 
   # headed when $DISPLAY is set AND the X server is reachable; otherwise fall back to headless so

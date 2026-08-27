@@ -51,7 +51,7 @@ def allowed_by(rules, path):
 
 def main():
     cfg = tomllib.loads(CONFIG.read_text())
-    perm = cfg["profile"]["persona"]["clients"]
+    perm = cfg["profile"]["persona"]["faces"]
     perm = next(c for c in perm if c.get("kind") == "permission")["permission"]
     external = perm["external"]
     read = perm["tools"]["read"]
@@ -71,7 +71,7 @@ def main():
     # here, so moving pi's scratch dir without moving the policy fails this instead of failing a
     # person mid-conversation.
     scratch = (
-        cfg["profile"]["persona"].get("backend", {}).get("pi", {}).get("scratch_dir")
+        cfg["profile"]["persona"].get("harness", {}).get("pi", {}).get("scratch_dir")
     )
     check("pi is given a scratch directory of its own", bool(scratch),
           "without one its files land loose in /tmp and the policy has to admit a name prefix")

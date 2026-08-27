@@ -1,4 +1,4 @@
-# persona: one container running `hmux up persona` (pi backend + webui/omni/opencode
+# persona: one container running `hmux up persona` (pi backend + admin/omni/opencode
 # faces). runs under `podman compose` (the default -- keep-id gives headed browsing) or
 # `docker compose` (which has no keep-id, so delete the `userns_mode` line -- see the note
 # on it). get the base image (khimaros/hmux) from the hmux repo or a registry, then
@@ -36,18 +36,19 @@ services:
     user: "${PERSONA_UID:-1000}:${PERSONA_GID:-1000}"
     userns_mode: "keep-id:uid=${PERSONA_UID:-1000},gid=${PERSONA_GID:-1000}"
     # ONE published port. every ui is reached through the hub's own port at the mount named in
-    # hmux/config.toml's `expose` (/webui, /chat, /omni, /voice), so the per-face publishes below
+    # hmux/config.toml's `expose` (/admin, /chat, /omni, /voice), so the per-face publishes below
     # are redundant -- uncomment one only to reach that face directly. the eval overrides the hub
     # port from its shell (PERSONA_HUB_PORT -> a random free port) so a run never collides with,
     # or has to shut down, the developer's own `persona` container. see the Makefile eval target.
     ports:
       - "${PERSONA_HUB_PORT:-4280}:4280"     # hub (the browser dials this; every face hangs off it)
-      #- "${PERSONA_WEBUI_PORT:-4282}:4282"   # webui  (also at /webui)
+      #- "${PERSONA_ADMIN_PORT:-4282}:4282"   # admin  (also at /admin)
       #- "${PERSONA_OMNI_PORT:-4284}:4284"    # omni   (also at /omni)
       #- "${PERSONA_CHAT_PORT:-4290}:4290"    # chat   (also at /chat)
       # the opencode face has no `expose` mount: an `opencode attach` TUI dials a base url, which a
       # path-prefixed proxy has not been tested against. publish it to use `make attach`.
       #- "${PERSONA_FACE_PORT:-4096}:4096"    # opencode face (tui `opencode attach`)
+      #- "${PERSONA_CANVAS_PORT:-4294}:4294"  # canvas (also at /canvas)
     volumes:
       - persona-data:/data                           # HOME: pi config, auth, sessions
       - persona-work:/work                           # workspace (traits/hooks/prompts/...)
@@ -81,6 +82,15 @@ services:
       # a headed chrome on it, shared with the agent. empty when the host has no X -> stays headless.
       # the eval overrides this back to empty so eval browser tests never open a window (see eval yml).
       - DISPLAY=${DISPLAY:-}
+      # THE CONTAINER'S OWN DISPLAY, when none is forwarded above: the entrypoint starts an Xvfb on
+      # it and the canvas face serves it at /canvas, so the browser Per drives is one you can watch
+      # and take the mouse on. both are optional -- empty means the defaults (:88, 1280x800x24).
+      #
+      # :88 AND NOT :99 because /tmp/.X11-unix is bind-mounted below, which makes the display
+      # NUMBER a namespace shared with your host -- and :99 is exactly what an `xvfb-run` on your
+      # machine takes first. set PERSONA_DISPLAY if :88 collides too.
+      - PERSONA_DISPLAY=${PERSONA_DISPLAY:-}
+      - PERSONA_SCREEN=${PERSONA_SCREEN:-}
       # host-specific / secret runtime env (incl. the matrix bridge HMUX_BRIDGE_* vars) comes from
       # persona.env. the eval NEVER inherits those: docker-compose.eval.yml (used only by the eval
       # targets, never `make up`) overrides HMUX_BRIDGE_* with explicit safe values. see that file.

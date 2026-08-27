@@ -10,7 +10,7 @@ self-model composes across whichever harness is active.
 
 persona runs fully sandboxed in a container, served by
 [hmux](https://github.com/khimaros/hmux) as its single control plane: one image drives
-`hmux up`, exposing a chat webui, a voice ui, and an opencode-compatible face for the tui.
+`hmux up`, exposing an admin console, a voice ui, and an opencode-compatible face for the tui.
 the harness underneath is pi (canonical) or opencode.
 
 persona has a heartbeat mechanism, a simple default SOUL.md, task tracking, and a journal.
@@ -133,17 +133,18 @@ http://localhost:4280/
 the hub root is the **portal**: a launcher listing every face persona serves, each a large tap
 target with a live online dot. everything reaches persona through that single port:
 
-- `/webui` -- the full chat ui: tools, thinking, permission prompts
+- `/admin` -- the full chat ui: tools, thinking, permission prompts
 - `/chat` -- a simplified chat: sessions, a transcript, a prompt box
 - `/omni` -- voice and text
 - `/touch` -- the ambient display
+- `/canvas` -- the screen Per's browser is on, live, and yours to take the mouse on
 
 opening a face FROM the portal starts a FRESH session. reaching the same page any other way --
 a bookmark, a reload, the back button -- resumes the session you were last in. a face that is
 merely offline stays listed and greyed out; the voice face carries a machine protocol rather
 than a page, so the portal does not list it.
 
-say hi in `/webui` and Per introduces itself. see [chat](#chat) for what to ask it.
+say hi in `/admin` and Per introduces itself. see [chat](#chat) for what to ask it.
 
 ### 4. keep it off the open internet
 
@@ -203,12 +204,12 @@ device-code flow once against the persisted `/data` volume.
 ## the faces
 
 every ui hangs off the hub's single published port and is listed on the portal. each face can
-also be published on a port of its own -- add `-p 4282:4282` (webui), `4284` (omni), `4290`
+also be published on a port of its own -- add `-p 4282:4282` (admin), `4284` (omni), `4290`
 (chat) -- but there is rarely a reason to.
 
-### webui
+### admin
 
-`http://localhost:4280/webui` -- the full renderer: tool calls, thinking, permission prompts.
+`http://localhost:4280/admin` -- the full renderer: tool calls, thinking, permission prompts.
 `/chat` is the same conversation through a plainer surface.
 
 ### touch
@@ -246,7 +247,7 @@ use the **Per** agent for friendly conversation, browser use, and memory:
 
 see also: [browser use](#browser-use)
 
-### admin
+### the admin agent
 
 use the **Admin** agent for meta-administration:
 
@@ -269,8 +270,36 @@ own uid so a sandboxed chrome can reach that socket (`--user 1000:1000
 with it running, `make browser-head` grants local X access and opens a real chrome window on
 your desktop -- the same instance the agent drives, so you can watch, or take over to solve a
 captcha. it blocks until you close the window; `make browser-stop` closes the session from
-another shell. with no reachable display it falls back to headless. VNC would be the remote /
-non-X11 alternative.
+another shell.
+
+#### watching from anywhere
+
+you do not need any of that to watch. the container runs **its own display** (an Xvfb the
+entrypoint starts), so chrome is headed whether or not you have a desktop, and `/canvas` serves
+that screen live -- click, type and scroll in the page, from a phone if you like. it is a general
+canvas rather than a browser viewer: anything on that display is watchable, the browser being the
+first thing that is.
+
+and Per can **ask for you**. when it hits a captcha, a login it has no credentials for, or
+anything else it is stuck at rather than stuck about, it calls `canvas_request_input` and STOPS --
+the tool does not return until you answer. the admin console opens the screen in a modal, you do what is
+needed, and press *i'm done* (or *can't do this*, which it is also told). closing the window does
+not answer it; the request stays open until you do, or until it times out and Per is told nobody
+came.
+
+that display has a **window manager** on it, so it behaves like a desk rather than a poster:
+windows have titlebars you can drag, borders you can resize, and buttons to maximise or close. the
+viewer's toolbar also carries **standard sizes** -- phone, tablet, laptop, desktop -- and *fit to
+me*, which asks the browser to be the size of the space you are looking at. these resize the real
+window, so the page lays itself out at that width with chrome's own furniture around it, which is
+what a screenshot cropped to a phone shape cannot give you. (a phone-shaped window is still not a
+phone: touch, the pixel ratio and the user agent all still say desktop.) one display, one window --
+so if two people are watching, the last size asked for is the one everybody sees.
+
+`PERSONA_DISPLAY` moves the container's display number if `:88` collides with something on your
+host -- `/tmp/.X11-unix` is shared with it, so the numbers are one namespace. a forwarded
+`$DISPLAY` still wins, and `/canvas` then shows that display instead (and no window manager is
+started there -- your desktop already has one). `PERSONA_WM=none` goes back to a bare display.
 
 ### logs
 
@@ -302,7 +331,7 @@ make up            # start (detached); seeds persona.env from the example on fir
 make down          # stop and remove
 make restart       # restart the container
 make logs          # follow the logs
-make webui         # open the ui
+make admin         # open the ui
 make browser-head  # open a headed chrome on your desktop (shared with the agent)
 make browser-stop  # close the shared browser session
 ```

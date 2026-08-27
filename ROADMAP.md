@@ -263,7 +263,7 @@
         never resolves can no longer discard the others' work -- on timeout the hub completes with the
         mutations accumulated so far (hcp's replace preserved). Clock gained schedule/cancel_intercept
     [x] unified client ordering with backend ordering: faces arm with a `kind` (not a self-chosen priority);
-        the hub ranks the interception chain by HMUX_CLIENT_PREFERENCES (config order, connect-timing-independent),
+        the hub ranks the interception chain by HMUX_FACE_PREFERENCES (config order, connect-timing-independent),
         mirroring HMUX_HARNESS_PREFERENCES. removed BRIDGE_PRIORITY/PERMISSION_PRIORITY and the hcp --priority flag
     [x] e2e coverage for the class of bug: multiface_sysprompt_test.py (7/0, hcp+bridge+omni composition) +
         mutation_chain_timeout_test.py (3/0, stalled-face hub bound). full hmux e2e + hub suite green
@@ -400,6 +400,73 @@
         and conclude the thing does not exist. fifteen clusters, counted from the source
         (spoke/peer 17+464, backend/harness 560+940, ten verbs for "end something",
         seven for "tell the hub about yourself").
+
+[~] the browser Per drives becomes one somebody can WATCH, and take the mouse on (2026-08-24,
+    user-raised; upstream phase 55 in ../hmux). the agent has driven a chrome nobody could see
+    since the container existed: `browser-head` goes headed only when a host X socket is mounted
+    in and $DISPLAY forwarded, which assumes a desktop next to the container. everywhere else it
+    is headless -- so the one instruction skills/browser-use/SKILL.md gives for a captcha ("STOP
+    and ask the user to respond to the captcha") named something the user had no way to do.
+    [x] upstream: a general `canvas` MODALITY rather than a browser viewer. a source has a size,
+        a way to be captured and a way to be poked; X11 is the first one, so every GUI process in
+        the container is watchable the day it exists. the face is the voice face's shape -- an
+        ordinary hub client serving its own websocket, mounted on the hub's port, with the pixels
+        kept out of the hub actor.
+    [x] upstream: `canvas_request_input`, the tool that hands the mouse back. it BLOCKS until a
+        person says they are done, declines, or nobody comes; the webui opens the screen in a
+        modal when it sees the call running, and the answer comes back on the canvas socket.
+    [ ] persona turns it on: xvfb in the image so the container owns a display, the entrypoint
+        starting it, `kind = "canvas"` + a `/canvas` mount, and `canvas_*` in the permission
+        policy -- WITHOUT WHICH the tool is refused by `default = "deny"` and none of the above
+        exists as far as Per is concerned.
+        THE DISPLAY NUMBER IS SHARED WITH THE HOST, because docker-compose bind-mounts
+        /tmp/.X11-unix: the conventional :99 is exactly what an `xvfb-run` on a developer's
+        machine takes first, so persona takes :88 and PERSONA_DISPLAY moves it.
+        a forwarded host $DISPLAY still wins and is served instead, so the desktop path is
+        unchanged -- one setting decides which display chrome opens on AND which one is served.
+    [ ] the browser-use skill should say the tool exists. the prose instruction stays right; it
+        just now has a mechanism to name.
+    [x] A WINDOW MANAGER ON THAT DISPLAY (2026-08-26, user-raised: "could we give the canvas a
+        simple window manager with windows so that they can be moved around?"). the Dockerfile said
+        the opposite on purpose, and the old reasoning was true of the DISPLAY and false of the
+        PRODUCT: "chrome draws its own window furniture and nothing on this display needs moving,
+        resizing or focusing between apps". nothing does -- but the display is not for the machine,
+        it is for the person at /canvas, and with no wm chrome opens where it opened and stays
+        there for the life of the container. they could use the page and nothing around it.
+        JWM, CHOSEN BY MEASUREMENT: openbox is 29 packages and 64.2MB (libimlib2 pulls ghostscript
+        in) and defaults to click-to-focus; jwm is 3 packages, 1.36MB, one 260KB binary, one
+        readable config. persona ships its own display/jwmrc: no tray, no root menu, no pager, one
+        desktop -- everything drawn here is captured and streamed to whoever is watching, so
+        furniture is a cost paid forever -- and NO KEY BINDINGS AT ALL, because every <Key> is an X
+        grab and a grab takes that key away from the page underneath, including from the agent.
+        <FocusModel>sloppy</FocusModel> IS THE LOAD-BEARING LINE. XTEST delivers a keystroke to
+        whatever holds focus, and with no wm focus is PointerRoot -- the window under the pointer --
+        which is the rule the canvas input path has always been written against. click-to-focus
+        would change that rule underneath it. it is also jwm's default, so this states what we rely
+        on rather than configuring around it.
+        STARTED ONLY ON THE DISPLAY WE OWN, and unprivileged like everything else (setpriv to hmux,
+        with hmux-drop's setgroups guard for the keep-id userns). a forwarded desktop already has a
+        window manager and a second one fights it over every window on the screen, including
+        windows that are not ours. PERSONA_WM=none goes back to a bare display.
+        `jwm -p` PARSES THE CONFIG AT BUILD TIME, so a typo that would leave the canvas unmanaged
+        fails the build rather than degrading quietly at boot into exactly the behaviour we left.
+    [x] tests/display_test.py, in TWO HALVES that see different things. RECIPE: what the Dockerfile
+        and entrypoint say (the wm is installed, our config is where the entrypoint looks, focus is
+        sloppy, no key grabs, no furniture, started after the display exists and only on ours).
+        ARTIFACT: what the IMAGE DOES -- a real Xvfb, the real wm, a real client window, asked
+        whether it is managed (_NET_SUPPORTED carries _NET_MOVERESIZE_WINDOW / _NET_CLIENT_LIST /
+        _NET_FRAME_EXTENTS; the window is reparented; the frame has a 22px titlebar to drag).
+        THE ARTIFACT HALF SKIPS WHEN THE IMAGE PREDATES THE DOCKERFILE, because "you have not
+        rebuilt yet" is not a defect -- and it FAILS rather than skips when a current image is
+        missing the wm, which is the case that would otherwise ship. the skip is named IN THE
+        SUMMARY LINE, since a suite that ends "14 passed" while the half that would have caught a
+        stale image sat out is how an untested image ships (raised by the hmux session, which had
+        just shipped a six-hour-stale wasm behind a green recipe test).
+        23/23 against a rebuilt image; the RED it was written against was the whole recipe.
+    [ ] MEASURE WHAT THE DECORATIONS COST. the canvas capture loop is damage-driven, so a still
+        screen costs nothing, and a wm repaints a titlebar on focus change. the guess is that the
+        cost is bounded by crossings rather than by pointer motion. it is a guess; the measurement
+        must fail loudly on a zero-frame sample rather than averaging over an empty one.
 
 [ ] VOCABULARY CLEANUP, from that inventory. the suggestions below are grouped by who owns
     them; the hmux and hcp-spec ones are staged HERE and raised THERE, the way phase 40 was.
