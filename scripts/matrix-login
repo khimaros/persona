@@ -2,8 +2,8 @@
 # provision the matrix access token the hmux bridge face uses, into persona.env.
 #
 # HOST-side, and not a skill: it rewrites the host's persona.env (compose reads that at container
-# CREATE, so new credentials need `make down && make up`, not a restart) and shells out to the hmux
-# checkout beside persona. neither exists inside the container, so the agent could never run it.
+# CREATE, so new credentials need `make down && make up`, not a restart). It cannot run inside the
+# container, which is also why it is not fetched from one -- see below.
 #
 # a thin wrapper: hmux OWNS the implementation, because hmux owns the contract it enforces. the
 # bridge never logs in itself -- it whoamis the token it is handed and restores that (user, device)
@@ -15,21 +15,87 @@
 #   matrix-login --check  validate the token persona.env already carries; writes nothing
 #
 # existing env vars and comments are preserved; commented-out HMUX_BRIDGE_* keys are uncommented.
-# re-issuing a token mints a NEW device, which makes the bridge's per-device crypto store
-# (.hcp/bridge, relative to the bridge's cwd) stale -- wipe it after a re-issue.
 #
-# any argument is passed through. set HMUX_REPO if hmux is not checked out beside persona.
+# re-issuing a token mints a NEW device, which makes the bridge's per-device crypto store stale --
+# wipe it after a re-issue. that store lives under the bridge face's OWN state root,
+# `<state_root>/bridge`, which for a containerised persona is
+# /data/.local/state/hmux/persona/bridge -- inside the persona-data volume, NOT a host path, so a
+# `rm -rf` in this checkout removes nothing the bridge reads. The bridge logs the exact directory
+# it opens as `bridge: state under ...` on every armed start; use that. (It is NOT `.hcp/bridge`:
+# that was the arrangement where the hcp face's directory held the bridge's matrix identity, which
+# `up` was changed to fix. The old directory may still exist and is not what is read.)
+#
+# A CHECKOUT IS NO LONGER REQUIRED. this used to demand `../hmux/` and stop, so a deployment that
+# only ever PULLS the image could not provision the one credential its bridge cannot start without
+# -- the tool for it lived exclusively in a repo that deployment had no other reason to clone.
+#
+# so: a sibling checkout if there is one (a developer's edits take effect immediately), else the
+# script is read out of the hmux IMAGE, which persona already pulls. Not vendored: a second copy of
+# a rule hmux owns is the arrangement both repos keep removing.
+#
+# READ OUT OF THE IMAGE AND RUN ON THE HOST, rather than run inside it. The script rewrites THIS
+# file tree's persona.env and prompts for a password; a container would need the env file bind
+# mounted, a tty, and network to the homeserver, and would still be writing through a mount. It is
+# stdlib-only python3 by design, so the host runs it directly.
+#
+# set HMUX_REPO to point at a checkout explicitly; HMUX_IMAGE to name a different image.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 persona_root="$(cd "$here/.." && pwd)"
-hmux_repo="${HMUX_REPO:-$persona_root/../hmux}"
-script="$hmux_repo/scripts/matrix-login"
+image="${HMUX_IMAGE:-khimaros/hmux:latest}"
+in_image="/opt/hmux/scripts/matrix-login"
 
-if [ ! -x "$script" ]; then
-  echo "matrix-login: not found at $script" >&2
-  echo "check out hmux beside persona, or set HMUX_REPO to its path." >&2
+# an explicit HMUX_REPO is an INSTRUCTION, not a hint: if someone names a checkout and it has no
+# script in it, that is worth saying rather than silently reaching for an image they did not ask
+# about and did not expect to be running.
+if [ -n "${HMUX_REPO:-}" ]; then
+  script="$HMUX_REPO/scripts/matrix-login"
+  if [ ! -x "$script" ]; then
+    echo "matrix-login: HMUX_REPO is set to $HMUX_REPO but $script is not executable." >&2
+    exit 1
+  fi
+  exec "$script" --env-file "$persona_root/persona.env" "$@"
+fi
+
+sibling="$persona_root/../hmux/scripts/matrix-login"
+if [ -x "$sibling" ]; then
+  exec "$sibling" --env-file "$persona_root/persona.env" "$@"
+fi
+
+# CACHED UNDER THE DEPLOYMENT, not in a temp dir, so a second run costs nothing and an operator can
+# see what they are about to execute. Refreshed on every run that can reach the image: the token
+# contract is hmux's and a stale copy of it is the failure this whole wrapper exists to avoid.
+docker="${DOCKER:-docker}"
+cache_dir="$persona_root/.hmux-tools"
+cached="$cache_dir/matrix-login"
+
+if command -v "$docker" >/dev/null 2>&1; then
+  mkdir -p "$cache_dir"
+  # `--entrypoint cat` rather than `docker cp`, which needs a container created and removed. A
+  # failure here is not fatal while a cached copy exists -- being offline should not stop a tool
+  # that has already been fetched once.
+  if "$docker" run --rm --entrypoint cat "$image" "$in_image" > "$cached.tmp" 2>/dev/null \
+     && [ -s "$cached.tmp" ]; then
+    mv "$cached.tmp" "$cached"
+    chmod +x "$cached"
+  else
+    rm -f "$cached.tmp"
+    [ -x "$cached" ] || {
+      echo "matrix-login: could not read $in_image out of $image." >&2
+      echo "  the image may predate this tool being shipped in it -- pull a newer one," >&2
+      echo "  or check out hmux beside persona, or set HMUX_REPO to its path." >&2
+      exit 1
+    }
+    echo "matrix-login: could not refresh from $image; using the cached copy at $cached" >&2
+  fi
+fi
+
+if [ ! -x "$cached" ]; then
+  echo "matrix-login: no hmux checkout beside persona, and no way to read it from an image." >&2
+  echo "  check out hmux beside persona, set HMUX_REPO to its path, or install docker/podman" >&2
+  echo "  so it can be read out of $image." >&2
   exit 1
 fi
 
-exec "$script" --env-file "$persona_root/persona.env" "$@"
+exec "$cached" --env-file "$persona_root/persona.env" "$@"

@@ -52,14 +52,6 @@ services:
     volumes:
       - persona-data:/data                           # HOME: pi config, auth, sessions
       - persona-work:/work                           # workspace (traits/hooks/prompts/...)
-      # a deployment that wants /work and /data on the HOST -- editable and backed up without
-      # going through the container -- comments out the two above and uncomments these.
-      #- ./data:/data
-      #- ./workspace:/work
-      #- ./hmux/config.toml:/config/config.toml:ro    # the persona up profile
-      # merged over it at startup: this box's own overrides, gitignored. `make up` seeds it from
-      # the example (a bind mount of a missing file would create a DIRECTORY, and the config would
-      # then fail to parse); every line in that example is commented, so it changes nothing.
       - ./hmux/config.local.toml:/config/config.local.toml:ro
       # the host X11 socket: with $DISPLAY forwarded (below) the container's chrome renders on
       # your desktop, so `make browser-head` opens a HEADED, shared browser. harmless when the
