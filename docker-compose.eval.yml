@@ -9,6 +9,14 @@
 # even the bridge eval only ever reaches the local fake, never the real server.
 services:
   persona:
+    # AND THE EVAL RUNS AGAINST THE CHECKED-IN CONFIG. `hmux/config.local.toml` is this box's own
+    # policy and is gitignored, so letting it reach an eval would make the result depend on an
+    # untracked file -- a score that cannot be reproduced from the repo. pointed at the all-
+    # commented example instead of dropped, because compose merges volumes by target and a
+    # bind mount of a missing file creates a directory. (`make eval` never runs `make up`, so the
+    # real file may not even have been seeded.)
+    volumes:
+      - ./hmux/config.local.toml.example:/config/config.local.toml:ro
     # let the container reach a fake-matrix on the host (the bridge eval points HMUX_BRIDGE_HOMESERVER at it).
     extra_hosts:
       - "host.containers.internal:host-gateway"

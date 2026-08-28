@@ -176,8 +176,16 @@ copy [persona.env.example](persona.env.example) to `persona.env` and point the c
 `curl -O https://raw.githubusercontent.com/khimaros/persona/master/persona.env.example`. every
 line in it is commented, so an unedited copy changes nothing. that file is everything the CONTAINER
 reads: api keys, the matrix bridge, the voice endpoint, and any `HMUX_CFG_*` override of an
-`hmux/config.toml` setting -- which reaches every knob in that file, including tables it does
-not mention, so a deployment should not need to edit the config itself.
+`hmux/config.toml` setting -- which reaches every scalar in that file, including tables it does
+not mention.
+
+for what an environment variable cannot spell, copy
+[hmux/config.local.toml.example](hmux/config.local.toml.example) to `hmux/config.local.toml`
+(gitignored, seeded by `make up`, mounted read-only). it is merged over `hmux/config.toml` at
+startup: tables merge, scalars and lists replace, and a face is matched by its `kind`. that is how
+you add ONE permission rule without restating the policy -- and it is the only way to write a glob
+key like `"htru_*"` at all, since a `*` is not legal in an environment variable name. between the
+two, a deployment should not need to edit the checked-in config.
 
 what the runtime decides BEFORE the container exists -- published ports, where `/work` and
 `/data` live, the uid -- cannot come from `persona.env`, because it is handed to the container
@@ -327,7 +335,7 @@ the repo is only needed to BUILD persona, to run the evals, or to use the `make`
 it, then:
 
 ```
-make up            # start (detached); seeds persona.env from the example on first run
+make up            # start (detached); seeds persona.env and hmux/config.local.toml from the examples
 make down          # stop and remove
 make restart       # restart the container
 make logs          # follow the logs

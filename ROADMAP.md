@@ -374,6 +374,20 @@
     [x] tests/config_defaults_test.py guards the contract: what a deployment must not have to edit,
         and what must stay off in the shipped file.
 
+[x] AND THE ONE THING LEFT NOW HAS SOMEWHERE TO GO (2026-08-27, user-raised: "would it be simpler
+    to just allow a config.local.toml instead for local overrides?"). the item above closed with a
+    known hole -- "a glob key cannot go through an env var name" -- and it is worse than it reads:
+    compose refuses the variable outright (`unexpected character "*" in variable name`), and the
+    path a face's policy needs says `permission` twice, once to pick the row out of the [[faces]]
+    array by kind and once for the sub-table on it.
+    [x] upstream phase 66 (../hmux): `config.local.toml` beside the config, merged over it. tables
+        merge, scalars and lists replace, faces match BY KIND, and a kind the base does not run is
+        appended. env stays narrowest: file, local, environment.
+    [x] hmux/config.local.toml.example (every line commented), gitignored, seeded by `make up` --
+        a bind mount of a missing file creates a DIRECTORY, which would then fail to parse.
+    [x] docker-compose.eval.yml points that mount at the EXAMPLE, so an eval score never depends on
+        an untracked file. `make eval` does not run `make up`, so the real one may not exist either.
+
 [x] upstream phase 40 (../hmux, 2026-08-15, user-raised): notifications survive a restart, and a
     proactive dm gets a session. persona consumes both with NO config change:
     [x] the hub now persists its notes (`--state-dir`, derived by `up` as `<state root>/hub`).

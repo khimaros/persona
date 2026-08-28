@@ -54,7 +54,10 @@ composition + tools + heartbeat), `bridge` (matrix), `permission` (the tool-call
   matrix / eval), else fails closed. the hub turned its permission gate into a PLUGGABLE priority
   chain (a policy client decides or defers; humans are the fallback), so a different permission
   system is just a different client arming the hook. persona's initial policy is autonomy-safe
-  (default allow + a few dangerous-bash denies); tighten it in `hmux/config.toml`.
+  (default allow + a few dangerous-bash denies); tighten it in `hmux/config.toml`, or -- for a rule
+  that belongs to one box rather than the repo -- in `hmux/config.local.toml`, which is merged over
+  it at startup. that file is the only place a glob key can be written: `HMUX_CFG_*` reaches every
+  scalar in the config, and a `*` is not legal in an environment variable name.
 
 pi-evolve, the messenger-bridge, and the permission-system are all GONE as pi extensions -- they are
 the `hcp`, `bridge`, and `permission` FACES now. persona ships no pi extensions.

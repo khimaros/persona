@@ -66,8 +66,13 @@ image build:
 # compose loads persona.env with the SHORT `env_file` form (the compatible one), which requires the
 # file to exist -- so seed it from the example, whose every line is commented and therefore changes
 # nothing. a fresh clone comes up without an editing step.
+#
+# hmux/config.local.toml is seeded the same way and for the same reason -- a bind mount of a file
+# that does not exist creates a DIRECTORY, and the config would then fail to parse. empty means the
+# merge sets nothing, so a clone that never touches it behaves exactly as before.
 up:
 	@test -f persona.env || { cp persona.env.example persona.env; echo "seeded persona.env from persona.env.example"; }
+	@test -f hmux/config.local.toml || { cp hmux/config.local.toml.example hmux/config.local.toml; echo "seeded hmux/config.local.toml from hmux/config.local.toml.example"; }
 	$(COMPOSE) up -d
 .PHONY: up
 

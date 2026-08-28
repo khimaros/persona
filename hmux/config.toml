@@ -16,7 +16,6 @@ trust_headers = true
 single_user = true
 single_user_name = "human"
 single_user_display_name = "Human"
-ask_only_the_speaker = false
 
 [[profile.persona.faces]]
 kind = "admin"
@@ -55,7 +54,7 @@ bridge = { agent = "per", default_trigger = "mention", cleanup = "compact", clea
 [[profile.persona.faces]]
 kind = "federation"
 [profile.persona.faces.federation]
-name = "perseus"
+name = "per"
 substrates = ["veilid", "https"]
 tools = "manage"
 verify = "tofu"
