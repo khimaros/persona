@@ -4,6 +4,7 @@ hub = "0.0.0.0:4280"
 harnesses = ["pi"]
 cwd = "/work"
 expose = { admin = "/admin", chat = "/chat", "omni" = "/omni", voice = "/voice", touch = "/touch", canvas = "/canvas" }
+name = "per"
 
 [profile.persona.harness.pi]
 builtin_tools = ["read", "find", "ls", "grep", "bash"]
@@ -54,7 +55,10 @@ bridge = { agent = "per", default_trigger = "mention", cleanup = "compact", clea
 [[profile.persona.faces]]
 kind = "federation"
 [profile.persona.faces.federation]
-name = "per"
+# no `name` here on purpose: the face inherits `[profile.persona] name`, so the network identity
+# and the name the admin renders over the agent's own messages are one value. Setting it here
+# again wins over the profile (a face that names itself keeps its own) and is how they drifted --
+# this said "per" while the profile said "perseus".
 substrates = ["veilid", "https"]
 tools = "manage"
 verify = "tofu"

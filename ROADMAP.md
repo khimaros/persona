@@ -615,7 +615,10 @@
         [x] tests/userns_guard_test.py, recipe + artifact like display_test.py: starts the image
             flagless-on-bind (must refuse, must not chown), keep-id (must boot), and
             flagless-on-volumes (must boot). shown RED first -- the artifact half reproduced the
-            real chown, `marker went from uid 1000 to 100999`.
+            real chown, `marker went from uid 1000 to 100999`. both halves run on `make test`:
+            the artifact half was briefly gated behind a `make test-e2e` on an UNMEASURED cost
+            estimate (~2min), and three container starts turned out to be ~1.3s against ~8.8s for
+            the rest of the suite, so the gate bought nothing and came back out.
         [x] Makefile COMPOSE defaults to podman-compose (what a deployment runs, not `docker
             compose`) and `up` passes COMPOSE_RUN_ARGS, so a workstation runs the SAME invocation
             as production and a difference between them cannot be a surprise. the eval targets

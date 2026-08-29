@@ -20,12 +20,17 @@ recipe, where the chown lands inside podman's storage and harms nobody.
 
 TWO KINDS OF CHECK, as in display_test.py, because they see different things:
 
-  RECIPE -- what the entrypoint and the compose files SAY. cheap, always runs, and cannot tell
-  you whether the image was ever rebuilt from them.
+  RECIPE -- what the entrypoint and the compose files SAY. it reads four files, and it is what
+  catches the bind mounts going back to named volumes, the eval override being dropped, or the
+  guard being deleted or moved after the handoff.
 
   ARTIFACT -- what the IMAGE DOES, asked by starting it three ways and looking at what survived.
-  this is the half that catches a guard nobody built. it SKIPS when the image predates the
-  entrypoint, because "you have not rebuilt yet" is not a defect.
+  the half that catches a guard nobody built, and the only one that can. it SKIPS when the image
+  predates the entrypoint, because "you have not rebuilt yet" is not a defect.
+
+BOTH RUN ON `make test`. the artifact half was briefly gated behind a `make test-e2e` on the
+strength of a cost I had never measured (I said ~2min); three container starts are ~1.3s against
+~8.8s for the rest of the suite, so there was nothing to buy.
 """
 import json
 import os
