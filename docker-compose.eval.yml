@@ -17,6 +17,13 @@ services:
     # real file may not even have been seeded.)
     volumes:
       - ./hmux/config.local.toml.example:/config/config.local.toml:ro
+      # AND THE EVAL GETS ITS OWN THROWAWAY /work + /data. the base compose bind-mounts the real
+      # ./work and ./data; an eval against those would edit the live workspace (run 1's onboarding
+      # deletes BOOTSTRAP.md). named volumes are per-compose-project, so each `persona-eval-<hex>`
+      # run gets a fresh pair the entrypoint seeds and `down -v` discards. merged by TARGET, so
+      # these replace the bind mounts rather than adding to them.
+      - persona-work:/work
+      - persona-data:/data
     # let the container reach a fake-matrix on the host (the bridge eval points HMUX_BRIDGE_HOMESERVER at it).
     extra_hosts:
       - "host.containers.internal:host-gateway"
@@ -27,3 +34,7 @@ services:
       # force headless in evals: the base compose forwards the dev's $DISPLAY, but eval browser
       # tests must stay headless (deterministic, no window popping up on the dev's desktop).
       - DISPLAY=
+
+volumes:
+  persona-work:
+  persona-data:

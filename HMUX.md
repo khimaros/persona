@@ -83,11 +83,17 @@ the tui (`opencode attach`).
 
 ## volumes + provider config
 
-- `persona-work` -> `/work`: the workspace (traits/hooks/prompts/config). seeded from the
+`/work` and `/data` are HOST directories beside docker-compose.yml, bind-mounted rather than
+named volumes: a deploy that prunes (`down -v`) no longer wipes them. both are gitignored. the
+eval overrides them back to per-run named volumes -- see docker-compose.eval.yml.
+
+- `./work` -> `/work`: the workspace (traits/hooks/prompts/config). seeded from the
   baked `/opt/persona/workspace-seed` on first boot by the entrypoint, then mutable +
-  git-versioned (persona self-edits it; the hcp face commits changes).
-- `persona-data` -> `/data`: HOME. pi config, auth, and sessions persist here (no pi extensions
-  anymore -- hcp/bridge/permission are hmux faces).
+  git-versioned (persona self-edits it; the hcp face commits changes -- its own git repo,
+  nested inside this one and invisible to it).
+- `./data` -> `/data`: HOME. pi config, auth, and sessions persist here (no pi extensions
+  anymore -- hcp/bridge/permission are hmux faces). it grows to hundreds of MB: a chrome
+  profile and the pi/npm caches live here.
 - `~/.pi/agent/{models.json,settings.json,auth.json}` -> `/config/*` (read-only): the pi
   agent config (providers, ENABLED models + defaults, auth). the entrypoint copies them into
   `/data/.pi/agent/`. the provider host named in models.json must be reachable from the
@@ -117,10 +123,26 @@ then `exec hmux-drop "$@"` to reuse it):
   can reach the host X11 socket (owned by you, mode 0775) for HEADED browsing. `hmux-drop` sees it is
   already unprivileged and just execs. without keep-id, `hmux` would map to a subuid that cannot even
   `connect()` the socket.
-- **docker / no keep-id: start as root, drop.** the volumes are root-owned and the read-only `/config`
-  mounts appear root-owned (the 600 auth.json needs a root read), so the entrypoint seeds `/work` +
-  copies config as root, then `hmux-drop` chowns both volumes to `hmux` (unconditional + full-tree,
-  since config is re-copied every boot) and drops via setpriv before `hmux up`.
+- **docker / no keep-id: start as root, drop.** the read-only `/config` mounts appear root-owned
+  (the 600 auth.json needs a root read), so the entrypoint seeds `/work` + copies config as root,
+  then `hmux-drop` chowns `/work` + `/data` to `hmux` (unconditional + full-tree, since config is
+  re-copied every boot) and drops via setpriv before `hmux up`.
+
+the mapping is therefore NOT optional, and `make up` passes it as podman run args
+(`--podman-run-args=--user=1000:1000 --podman-run-args=--userns=keep-id:uid=1000,gid=1000`)
+because podman-compose 1.0.3 -- what a deployment runs -- ignores the `user:` and `userns_mode:`
+keys in the compose file. without it the container starts as root under a rootless userns, where
+`hmux` is a SUBUID on the host (100999) rather than you, and the chown above rewrites the
+bind-mounted `./work` and `./data` to it: the host user is locked out of its own agent's state
+until it runs `podman unshare chown -R 0:0`, and the symptom looks like the agent having lost its
+memory rather than like a misconfiguration.
+
+so the entrypoint REFUSES TO BOOT in that state, before the handoff to `hmux-drop`, and prints
+the invocation to use. it fires only on all three of: we are root, the userns is rootless
+(`/proc/self/uid_map` maps container 0 to a non-zero host uid), and the mount is a bind rather
+than a named volume -- the third keeps the README's own `podman run -v persona-work:/work`
+recipe working, where the chown lands inside the runtime's storage and harms nobody.
+`tests/userns_guard_test.py` checks the recipe and then starts the image all three ways.
 
 running non-root restores chrome's sandbox for browsing (no `--no-sandbox`); the container supports it
 (unprivileged user namespaces + the setuid chrome-sandbox helper both work). `make browser-head` execs

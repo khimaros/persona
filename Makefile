@@ -1,8 +1,25 @@
 # persona runs as a single container: a thin image FROM khimaros/hmux:browser driving `hmux
 # up persona` (pi backend + admin/omni/opencode faces). see HMUX.md.
 
-# docker or podman; override e.g. `make COMPOSE="podman compose" up`.
-COMPOSE ?= docker compose
+# podman-compose, BECAUSE THAT IS WHAT PRODUCTION RUNS (podman 4.3.1 + podman-compose 1.0.3 on
+# bookworm, which cannot be updated). override e.g. `make COMPOSE="docker compose" up`.
+COMPOSE ?= podman-compose
+
+# the uid mapping, and the reason `make up` is not just `$(COMPOSE) up -d`. podman-compose 1.0.3
+# IGNORES the `user:` and `userns_mode:` keys in docker-compose.yml, so with that runtime the
+# mapping has to arrive as podman run args or not at all -- and without it the container starts as
+# root, and hmux-drop's `chown -R hmux:hmux /work /data` rewrites the BIND-MOUNTED ./work and
+# ./data to a subuid the host cannot read. the entrypoint refuses to boot in that state rather
+# than let it happen (tests/userns_guard_test.py), so a forgotten mapping is an error and not a
+# loss -- but the point of putting it here is that a workstation runs the SAME invocation as
+# production, and a difference between them can never be a surprise.
+#
+# harmless to the other runtimes: `docker compose` and newer `podman compose` read the same
+# mapping from the compose file, so override COMPOSE_RUN_ARGS to empty when using one of those.
+PERSONA_UID ?= 1000
+PERSONA_GID ?= 1000
+COMPOSE_RUN_ARGS ?= --podman-run-args=--user=$(PERSONA_UID):$(PERSONA_GID) \
+                    --podman-run-args=--userns=keep-id:uid=$(PERSONA_UID),gid=$(PERSONA_GID)
 
 # the published image (docker hub) and its ghcr mirror. TAG defaults to latest; override
 # to cut a version alongside it: `make push TAG=v0.1.0`.
@@ -73,7 +90,7 @@ image build:
 up:
 	@test -f persona.env || { cp persona.env.example persona.env; echo "seeded persona.env from persona.env.example"; }
 	@test -f hmux/config.local.toml || { cp hmux/config.local.toml.example hmux/config.local.toml; echo "seeded hmux/config.local.toml from hmux/config.local.toml.example"; }
-	$(COMPOSE) up -d
+	$(COMPOSE) $(COMPOSE_RUN_ARGS) up -d
 .PHONY: up
 
 # there was a bind-mount "fast loop" here (host binary + client dists mounted over the image). it
@@ -202,14 +219,16 @@ test:
 	python3 tests/permission_policy_test.py
 	python3 tests/config_defaults_test.py
 	python3 tests/display_test.py
+	python3 tests/userns_guard_test.py
 .PHONY: test
 
 # run the eval heartbeat-free against the hmux hub (persona_eval.py is a native hub client).
 # each REPEAT run gets its OWN throwaway compose project + uniquely named container + fresh
-# /work and /data volumes, so no state leaks between runs: run 1's onboarding deletes
-# BOOTSTRAP.md, and a shared volume would make every later run's bootstrap tests fail
-# spuriously. the entrypoint seeds a fresh volume from scratch, and `down -v` discards it
-# after each run. the eval publishes the hub to a RANDOM free host port (PERSONA_HUB_PORT ->
+# /work and /data, so no state leaks between runs: run 1's onboarding deletes BOOTSTRAP.md,
+# and shared state would make every later run's bootstrap tests fail spuriously. `make up`
+# bind-mounts the developer's ./work and ./data, which an eval must NEVER write, so
+# docker-compose.eval.yml replaces both with per-project named volumes: the entrypoint seeds
+# a fresh one from scratch, and `down -v` discards it after each run. the eval publishes the hub to a RANDOM free host port (PERSONA_HUB_PORT ->
 # free_ports.py; the faces are not published at all and the eval only ever dials the hub) and only
 # ever removes `persona-eval-` prefixed containers/volumes, so the developer's own `persona`
 # container keeps running untouched on :4280.
@@ -226,7 +245,7 @@ eval:
 		echo "=== eval run $$run/$(REPEAT): fresh container + volumes ($$proj), hub on host :$$hubp ==="; \
 		PERSONA_HUB_PORT=$$hubp \
 		COMPOSE_PROJECT_NAME=$$proj PERSONA_CONTAINER=$$proj HMUX_HCP_HEARTBEAT_ENABLED=false \
-			$(COMPOSE_EVAL) up -d persona \
+			$(COMPOSE_EVAL) $(COMPOSE_RUN_ARGS) up -d persona \
 			|| { echo "EVAL SETUP FAILED: the container did not start"; exit 1; }; \
 		echo "waiting for hub + backend readiness (startup installs extension deps)..."; \
 		ready=""; \
@@ -262,7 +281,7 @@ eval-bridge:
 	COMPOSE_PROJECT_NAME=$$proj PERSONA_CONTAINER=$$proj HMUX_HCP_HEARTBEAT_ENABLED=false \
 		HMUX_BRIDGE_HOMESERVER=http://host.containers.internal:$(FAKE_MATRIX_PORT) \
 		HMUX_BRIDGE_USER_ID=@per:fake.local HMUX_BRIDGE_ACCESS_TOKEN=fake_token \
-		$(COMPOSE_EVAL) up -d persona; \
+		$(COMPOSE_EVAL) $(COMPOSE_RUN_ARGS) up -d persona; \
 	echo "waiting for hub + backend readiness..."; \
 	for w in $$(seq 1 90); do \
 		( cd evals && python3 wait_ready.py ws://localhost:$$hubp/ws ) && { echo "ready after $${w}s"; break; }; \

@@ -50,8 +50,13 @@ services:
       #- "${PERSONA_FACE_PORT:-4096}:4096"    # opencode face (tui `opencode attach`)
       #- "${PERSONA_CANVAS_PORT:-4294}:4294"  # canvas (also at /canvas)
     volumes:
-      - persona-data:/data                           # HOME: pi config, auth, sessions
-      - persona-work:/work                           # workspace (traits/hooks/prompts/...)
+      # HOST directories beside this file, not named volumes: everything persona has become is
+      # then readable, greppable and backed up without going through the container -- and it
+      # survives a `down -v`, which is how a deploy that prunes wiped the agent's memory. both
+      # are gitignored. the eval replaces them with throwaway named volumes, since an eval run
+      # must never write the real workspace (see docker-compose.eval.yml).
+      - ./data:/data                                 # HOME: pi config, auth, sessions
+      - ./work:/work                                 # workspace (traits/hooks/prompts/...)
       - ./hmux/config.local.toml:/config/config.local.toml:ro
       # the host X11 socket: with $DISPLAY forwarded (below) the container's chrome renders on
       # your desktop, so `make browser-head` opens a HEADED, shared browser. harmless when the
@@ -90,7 +95,3 @@ services:
       # host-specific / secret runtime env (incl. the matrix bridge HMUX_BRIDGE_* vars) comes from
       # persona.env. the eval NEVER inherits those: docker-compose.eval.yml (used only by the eval
       # targets, never `make up`) overrides HMUX_BRIDGE_* with explicit safe values. see that file.
-
-volumes:
-  persona-work:
-  persona-data:

@@ -365,7 +365,8 @@
         cannot go through an env var name. documented commented next to persona_*.
     [x] docker-compose.yml publishes only :4280 and carries a commented host-directory alternative
         to the /work + /data volumes, so the one thing a deployment still changes here is two lines
-        it can see, next to the default it is replacing.
+        it can see, next to the default it is replacing. (SUPERSEDED 2026-08-29: host directories
+        are the default now, and the commented alternative is gone -- see the item at the end.)
     [x] env_file back to the SHORT form for compatibility (the long form needs Compose v2.24+);
         `make up` seeds persona.env from the example, since the short form requires the file.
     [x] found on the way: ports/uid/$DISPLAY were documented in persona.env.example but are compose
@@ -581,4 +582,42 @@
         hmux's tiers (1 hub-boundary / 2 in-harness mutation) are unrelated numbering schemes
         that meet in every document about this stack. one of them should stop being called a
         tier.
+
+[x] /work and /data are HOST DIRECTORIES, not named volumes (2026-08-29, user-raised). the
+    production deploy is `podman system prune --force --all; podman-compose down -v; ... up`,
+    and `down -v` destroys a named volume -- so every deploy wiped everything persona had
+    become, and nothing off the host could be read, grepped or backed up without going through
+    the container. plain relative bind mounts, which podman-compose 1.0.x understands (the
+    production box is podman 4.3.1, too old for `user:`/`userns_mode:` in the file, hence its
+    --podman-run-args).
+    [x] docker-compose.yml mounts ./data and ./work; the top-level `volumes:` block is gone.
+        both directories are already gitignored, and now .dockerignored -- ~600MB of sessions,
+        caches and a chrome profile would otherwise land in the build context.
+    [x] docker-compose.eval.yml keeps the eval on per-project NAMED volumes, replacing the bind
+        mounts by target. without this every eval run would edit the live workspace (run 1's
+        onboarding deletes BOOTSTRAP.md) and `down -v` would clean nothing. verified: an eval
+        project comes up on persona-eval-*_persona-{work,data} with a fresh seed.
+    [x] migrated this box: `down`, rsync both volumes' _data into ./work (604 files) and ./data
+        (13,257 files, 601MB), `up`. container healthy, hub ready, container writes land in the
+        host directory. the old persona_persona-{work,data} volumes are left in place as a
+        backup and can be pruned once the new layout has run a while.
+    [x] AND THE UID MAPPING IS NOW LOAD-BEARING, so a forgotten flag is an error and not a loss.
+        hmux-drop chowns /work + /data whenever it starts as root, and under a rootless userns
+        `hmux` is the SUBUID 100999, not you -- measured: a flagless start rewrote the whole host
+        tree, recoverable only with `podman unshare chown -R 0:0`, and the symptom reads as the
+        agent having lost its memory. running as container root instead (rootless maps 0 to the
+        invoking user, so no flags would be needed at all) was built and REJECTED: it gives up
+        chrome's sandbox and the unprivileged runtime for a deployment convenience.
+        [x] docker-entrypoint.sh refuses to boot before the handoff to hmux-drop, printing the
+            invocation to use. three signals ANDed -- root, rootless uid_map, and a BIND mount
+            rather than a named volume; the third keeps the README's standalone `podman run -v
+            persona-work:/work` recipe working, where the chown harms nobody.
+        [x] tests/userns_guard_test.py, recipe + artifact like display_test.py: starts the image
+            flagless-on-bind (must refuse, must not chown), keep-id (must boot), and
+            flagless-on-volumes (must boot). shown RED first -- the artifact half reproduced the
+            real chown, `marker went from uid 1000 to 100999`.
+        [x] Makefile COMPOSE defaults to podman-compose (what a deployment runs, not `docker
+            compose`) and `up` passes COMPOSE_RUN_ARGS, so a workstation runs the SAME invocation
+            as production and a difference between them cannot be a surprise. the eval targets
+            pass it too.
 ```

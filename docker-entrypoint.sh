@@ -4,6 +4,53 @@
 # extensions anymore -- hcp, bridge and permission are all hmux faces (see hmux/config.toml).
 set -euo pipefail
 
+# REFUSE TO BOOT rather than let the base image chown the deployment's own state away from it.
+# docker-compose.yml bind-mounts ./work and ./data, and hmux-drop ends this script by running
+# `chown -R hmux:hmux /work /data` whenever it starts as root. under rootless podman `hmux` (uid
+# 1000 in here) is a SUBUID on the host, not the invoking user, so that chown rewrites the whole
+# tree to a uid the host cannot read -- recoverable only with `podman unshare`, and silent enough
+# that it reads as the agent having lost its memory rather than as a misconfiguration.
+#
+# the fix is a uid mapping, which cannot be applied from inside the container. so: say no, and say
+# what to run. production is podman-compose 1.0.3, which ignores `user:` and `userns_mode:` in the
+# compose file, which is exactly why the mapping is a run arg somebody can leave off.
+#
+# THREE SIGNALS, and all three are needed to avoid refusing something that is fine:
+#   - we are root, so hmux-drop will take its chown branch at all;
+#   - the userns is rootless (uid_map sends container 0 to a NON-ZERO host uid). rootful docker
+#     maps 0 -> 0, where root IS root and the chown is the documented behaviour;
+#   - the mount is a BIND, not a named volume. on a named volume the chown lands inside the
+#     runtime's own storage and harms nobody, which is the README's standalone `podman run
+#     -v persona-work:/work` recipe and must keep working.
+guard_state_ownership() {
+  [ "$(id -u)" = 0 ] || return 0
+  local map_host_uid src
+  map_host_uid="$(awk 'NR==1{print $2; exit}' /proc/self/uid_map 2>/dev/null || true)"
+  [ -n "$map_host_uid" ] && [ "$map_host_uid" != 0 ] || return 0
+  for d in /work /data; do
+    # mountinfo field 4 is the source path within its filesystem, field 5 the mount point.
+    src="$(awk -v d="$d" '$5==d {print $4; exit}' /proc/self/mountinfo 2>/dev/null || true)"
+    case "$src" in
+      ""|*/containers/storage/volumes/*|*/docker/volumes/*) continue ;;
+    esac
+    cat >&2 <<EOF
+persona: refusing to start -- $d is a host directory ($src) and this container would chown it away
+persona: from you. container uid 0 maps to host uid $map_host_uid here, so the unprivileged user
+persona: the agent runs as is a subuid (not you), and the startup chown would make $d unreadable
+persona: on the host until you run: podman unshare chown -R 0:0 <dir>
+persona:
+persona: start it with the uid mapping instead:
+persona:   podman-compose --podman-run-args=--user=1000:1000 \\
+persona:     --podman-run-args=--userns=keep-id:uid=1000,gid=1000 up
+persona:
+persona: (docker compose and newer podman compose read the same thing from the user: and
+persona: userns_mode: keys already in docker-compose.yml; podman-compose 1.0.3 ignores them.)
+EOF
+    exit 1
+  done
+}
+guard_state_ownership
+
 # the base image does not expose the pi cli on PATH (it lives under the mise install tree); put it
 # there so the hmux pi backend can launch it.
 pi_bin="$(dirname "$(ls /opt/mise/installs/npm-earendil-works-pi-coding-agent/*/bin/pi 2>/dev/null | head -1)")"

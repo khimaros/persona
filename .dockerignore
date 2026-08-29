@@ -8,6 +8,11 @@
 # secrets + host-specific provider config (also gitignored); never bake into the image.
 persona.env
 models.json
+# the live /work and /data bind mounts (gitignored, ~600MB of sessions, caches and a chrome
+# profile). the image seeds a FRESH workspace from workspace/, so these are runtime state that
+# would only bloat the build context and bake host secrets in.
+work
+data
 # host-side tooling: rewrites the host's persona.env and shells out to the hmux checkout beside
 # persona, neither of which exists in the image. everything under skills/ IS shipped.
 scripts

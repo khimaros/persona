@@ -192,9 +192,12 @@ what the runtime decides BEFORE the container exists -- published ports, where `
 only after all of that is settled. those are flags on the run command, or the `ports:` /
 `volumes:` / `user:` keys in compose.
 
-`/work` and `/data` are named volumes by default. a deployment that wants them on the HOST --
-editable and backed up without going through the container -- swaps in bind mounts
-(`-v ./workspace:/work -v ./data:/data`).
+the standalone recipes above use named volumes. the repo's own
+[docker-compose.yml](docker-compose.yml) bind-mounts host directories instead -- `./work` and
+`./data` beside the file, both gitignored -- so everything persona has become is readable and
+backed up without going through the container, and survives a `down -v`. to move an existing
+deployment across: `down`, copy each volume's `_data` (`docker volume inspect <name>` gives the
+path) into `./work` and `./data`, then `up`.
 
 ## model setup
 
@@ -346,9 +349,24 @@ make browser-stop  # close the shared browser session
 
 `make` drives [docker-compose.yml](docker-compose.yml), which carries the same shape as the
 compose file above plus the X11 forwarding, the config mount, and comments on every knob. it
-defaults to `docker compose`; use `make COMPOSE="podman compose" ...` for podman. that file
-is written for rootless podman -- on docker, delete the `userns_mode` line, since `keep-id` is
-a podman-only knob (docker maps the container user to your host uid directly).
+defaults to `podman-compose`, which is what a deployment runs; use `make COMPOSE="docker
+compose" ...` for docker. that file is written for rootless podman -- on docker, delete the
+`userns_mode` line, since `keep-id` is a podman-only knob (docker maps the container user to
+your host uid directly).
+
+`make up` also passes the uid mapping as podman run args:
+
+```
+--podman-run-args=--user=1000:1000 --podman-run-args=--userns=keep-id:uid=1000,gid=1000
+```
+
+**this is not optional, and it is why `make up` is not a bare `up -d`.** podman-compose 1.0.3
+(bookworm) ignores the `user:` and `userns_mode:` keys in the compose file, so with that runtime
+the mapping arrives here or not at all -- and without it the container starts as root, where the
+base image chowns the bind-mounted `./work` and `./data` to a subuid your host user cannot read.
+The container refuses to boot in that state rather than let it happen, and prints the invocation
+to use. Set `PERSONA_UID`/`PERSONA_GID` if your host uid is not 1000, or `COMPOSE_RUN_ARGS=` to
+empty when using a runtime that reads the mapping from the file.
 
 to run the PUBLISHED image from the checkout rather than building one:
 
