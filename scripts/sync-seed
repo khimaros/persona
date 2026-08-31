@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""bring `volumes/work/` up to date with `workspace/`, one file at a time, with your eyes on it.
+
+WHY THIS EXISTS. the image seeds `/work` from `workspace/` ON FIRST BOOT ONLY -- the entrypoint
+copies the seed when the volume is empty and never again. that is correct: `/work` is the agent's
+own content and an upgrade must not overwrite what it has become. but it means PULLING A NEW IMAGE
+IS NOT THE WHOLE UPGRADE, and the half that is left has no tooling and no reminder. a hook that
+still names tools the host no longer serves, or a TOOLS.md pointing at a retired family, keeps
+working exactly well enough not to be noticed.
+
+THE ASYMMETRY IS THE WHOLE DESIGN, and it is deliberate in both directions:
+
+  in the seed, not live     NEW      -> offered, because the image knows something the volume does not
+  in both, differing        CHANGED  -> diffed and offered, because you are the one who can tell
+                                       "the seed moved on" from "the agent edited this on purpose"
+  live, not in the seed     YOURS    -> NEVER TOUCHED, not offered, not counted against you. this is
+                                       everything the agent has written for itself, which is the
+                                       point of the volume existing
+
+so this can add and it can overwrite, and it can never delete. the worst outcome of a wrong answer
+here is a file you can recover from `git -C volumes/work log`, because memory versions that tree.
+
+nothing is written without an explicit `y` -- there is no `--yes`, on purpose. the reason to read a
+diff is that only you know which side is right, and a flag to skip the reading would defeat the one
+thing the script is for. `--dry-run` reports without prompting.
+"""
+
+import argparse
+import difflib
+import filecmp
+import shutil
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+SEED = REPO / "workspace"
+LIVE = REPO / "volumes" / "work"
+
+# never compared or offered: git's own store, python's caches, and the host state an older
+# arrangement left in the tree.
+SKIP_DIRS = {".git", "__pycache__", ".hcp"}
+SKIP_SUFFIXES = {".pyc", ".pyo"}
+# how much of a new file to show before it stops being a preview.
+PREVIEW_LINES = 40
+
+
+def walk(root: Path):
+    """every file under `root`, as paths relative to it, in a stable order."""
+    if not root.is_dir():
+        return []
+    out = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root)
+        if SKIP_DIRS & set(rel.parts) or p.suffix in SKIP_SUFFIXES:
+            continue
+        out.append(rel)
+    return sorted(out)
+
+
+def is_text(path: Path) -> bool:
+    try:
+        path.read_text()
+        return True
+    except (UnicodeDecodeError, OSError):
+        return False
+
+
+def show_diff(seed: Path, live: Path, rel: Path) -> None:
+    if not (is_text(seed) and is_text(live)):
+        print(f"    (binary; {live.stat().st_size} bytes live, {seed.stat().st_size} in the seed)")
+        return
+    diff = difflib.unified_diff(
+        live.read_text().splitlines(keepends=True),
+        seed.read_text().splitlines(keepends=True),
+        fromfile=f"live/{rel}",
+        tofile=f"seed/{rel}",
+    )
+    sys.stdout.writelines(diff)
+
+
+def show_new(seed: Path, full: bool = False) -> bool:
+    """print a new file. returns whether anything was held back.
+
+    A NEW FILE HAS NOTHING TO DIFF AGAINST, which is why this reports truncation rather than
+    leaving the caller to offer a "show it again" that reprints the identical text. that is exactly
+    what it did at first, and pressing `d` on a short file looked like the script was stuck.
+    """
+    if not is_text(seed):
+        print(f"    (binary, {seed.stat().st_size} bytes)")
+        return False
+    lines = seed.read_text().splitlines()
+    shown = lines if full else lines[:PREVIEW_LINES]
+    for line in shown:
+        print(f"    {line}")
+    held = len(lines) - len(shown)
+    if held > 0:
+        print(f"    ... {held} more line(s) -- `f` shows the whole file")
+    return held > 0
+
+
+def copy(seed: Path, live: Path) -> None:
+    """copy the seed over the live file, PRESERVING MODE -- the hooks and tests are executable, and
+    a hook that arrives without its +x is discovered, skipped, and reported as no hook at all."""
+    live.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(seed, live)
+
+
+def ask(prompt: str) -> str:
+    try:
+        answer = input(prompt).strip().lower()
+        # A PIPED RUN ECHOES NOTHING. a terminal emits the newline the user typed; a pipe does not,
+        # so whatever prints next lands on the prompt's own line and a captured transcript reads as
+        # garbled. cheap to add, and it is captured transcripts that get pasted into bug reports.
+        if not sys.stdin.isatty():
+            print()
+        return answer
+    except EOFError:
+        # NOT A DEFAULT YES. a closed stdin is "nobody is reading these diffs", which is the one
+        # situation where writing is least defensible.
+        print("\n(stdin closed -- stopping without writing)")
+        return "q"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report what differs and write nothing")
+    ap.add_argument("--seed", type=Path, default=SEED, help=f"default {SEED}")
+    ap.add_argument("--live", type=Path, default=LIVE, help=f"default {LIVE}")
+    args = ap.parse_args()
+
+    seed_root, live_root = args.seed.resolve(), args.live.resolve()
+    if not seed_root.is_dir():
+        print(f"sync-seed: no seed at {seed_root}")
+        return 2
+    if not live_root.is_dir():
+        print(f"sync-seed: no live volume at {live_root}")
+        print("           has the container ever run? the entrypoint seeds it on first boot.")
+        return 2
+
+    seed_files = walk(seed_root)
+    live_files = set(walk(live_root))
+
+    new = [r for r in seed_files if r not in live_files]
+    changed = [r for r in seed_files
+               if r in live_files
+               and not filecmp.cmp(seed_root / r, live_root / r, shallow=False)]
+    theirs = sorted(live_files - set(seed_files))
+
+    print(f"seed: {seed_root}")
+    print(f"live: {live_root}")
+    print(f"  {len(new)} new in the seed, {len(changed)} changed, "
+          f"{len(theirs)} the agent's own (untouched)")
+    if not new and not changed:
+        print("\nnothing to do -- the live volume already carries the whole seed.")
+        return 0
+    if args.dry_run:
+        for rel in new:
+            print(f"  NEW      {rel}")
+        for rel in changed:
+            print(f"  CHANGED  {rel}")
+        return 0
+
+    print("\n  y = write it   n = skip   a = write all remaining   q = stop")
+    print("  d = show the diff again (changed)      f = show the whole file (new)\n")
+    written, skipped, take_all = [], [], False
+
+    for rel, kind in [(r, "NEW") for r in new] + [(r, "CHANGED") for r in changed]:
+        s, l = seed_root / rel, live_root / rel
+        print(f"--- {kind}  {rel}")
+        truncated = show_new(s) if kind == "NEW" else (show_diff(s, l, rel) or False)
+        while True:
+            if take_all:
+                answer = "y"
+            else:
+                # THE KEYS ON OFFER ARE THE ONES THAT DO SOMETHING. `d` on a new file had nothing to
+                # re-diff and reprinted the same preview, which reads as the script looping.
+                keys = "y/n/f/a/q" if (kind == "NEW" and truncated) else (
+                    "y/n/d/a/q" if kind == "CHANGED" else "y/n/a/q")
+                answer = ask(f"    write {rel}? [{keys}] ")
+            if answer == "f" and kind == "NEW":
+                truncated = show_new(s, full=True)
+                continue
+            if answer == "d":
+                if kind == "CHANGED":
+                    show_diff(s, l, rel)
+                else:
+                    print("    (a new file has nothing to diff against -- `f` shows it in full)")
+                continue
+            if answer == "a":
+                take_all, answer = True, "y"
+            if answer == "y":
+                copy(s, l)
+                written.append(rel)
+            elif answer == "q":
+                print(f"\nstopped. {len(written)} written, {len(skipped)} skipped, "
+                      f"{len(new) + len(changed) - len(written) - len(skipped)} not reached.")
+                report(written, live_root)
+                return 0
+            else:
+                skipped.append(rel)
+            break
+        print()
+
+    print(f"\n{len(written)} written, {len(skipped)} skipped, {len(theirs)} of the agent's own left alone.")
+    report(written, live_root)
+    return 0
+
+
+def report(written, live_root: Path) -> None:
+    """what to do next, and only when it is actually needed."""
+    if not written:
+        return
+    print("\nmemory versions that tree, so anything here is recoverable:")
+    print(f"  git -C {live_root} log --oneline -5")
+    # THE REMINDER IS CONDITIONAL, because an unconditional one is the kind people learn to skip.
+    if any(str(r).startswith("hooks/") for r in written):
+        print("\na HOOK changed. the hcp face discovers hooks at startup, and `--reload-tools` only")
+        print("re-reads them after the agent edits one -- so restart to pick this up:")
+        print("  make restart")
+    if any(str(r).startswith(("traits/", "prompts/")) for r in written):
+        print("\na TRAIT or PROMPT changed. these compose into the system prompt, which the host")
+        print("freezes per session -- existing sessions keep the old text until they end.")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

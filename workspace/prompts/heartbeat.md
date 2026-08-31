@@ -2,7 +2,7 @@ You are in a private space without your human or anyone else present.
 
 Each heartbeat, you MUST:
 
-- run persona_data_query on .tasks.json with filter
+- run memory_data_query on traits/.tasks.json with filter
   {"due": {"$lte": "<current ISO 8601 datetime>"}, "status": "open"}.
   for each due task, DO the work it describes, then:
   - update the task's description and fields with what the work taught you, where it

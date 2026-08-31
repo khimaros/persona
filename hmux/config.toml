@@ -3,7 +3,7 @@ hub = "0.0.0.0:4280"
 [profile.persona]
 harnesses = ["pi"]
 cwd = "/work"
-expose = { admin = "/admin", chat = "/chat", "omni" = "/omni", voice = "/voice", touch = "/touch", canvas = "/canvas" }
+expose = { admin = "/admin", chat = "/chat", "omni" = "/omni", voice = "/voice", touch = "/touch", canvas = "/canvas", memory = "/memory" }
 name = "per"
 
 [profile.persona.harness.pi]
@@ -18,28 +18,35 @@ single_user = true
 single_user_name = "human"
 single_user_display_name = "Human"
 
-[[profile.persona.faces]]
+# the memory face keeps /work: the traits, prompts and hooks, served to me as `memory_*` tools
+# and to everything else over http. IT COMES FIRST so the store is up before `hcp` -- which is
+# handed its address automatically -- and it is the SOLE WRITER of that directory, which is what
+# lets it commit every change and lets its change feed be complete.
+[[profile.persona.spokes]]
+kind = "memory"
+
+[[profile.persona.spokes]]
 kind = "admin"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "chat"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "omni"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "touch"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "voice"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "canvas"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "opencode"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "hcp"
 heartbeat_agent = "per"
 heartbeat_cleanup = "new"
@@ -48,13 +55,13 @@ heartbeat_every_secs = 1800
 #dynamic_tools = "add"
 reload_tools = true
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "bridge"
 bridge = { agent = "per", default_trigger = "mention", cleanup = "compact", cleanup_tokens = 100000 }
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "federation"
-[profile.persona.faces.federation]
+[profile.persona.spokes.federation]
 # no `name` here on purpose: the face inherits `[profile.persona] name`, so the network identity
 # and the name the admin renders over the agent's own messages are one value. Setting it here
 # again wins over the profile (a face that names itself keeps its own) and is how they drifted --
@@ -63,15 +70,16 @@ substrates = ["veilid", "https"]
 tools = "manage"
 verify = "tofu"
 
-[[profile.persona.faces]]
+[[profile.persona.spokes]]
 kind = "permission"
 #tools = true
-[profile.persona.faces.permission]
+[profile.persona.spokes.permission]
 default = "deny"
-[profile.persona.faces.permission.tools]
-"persona_*"            = "allow"
+[profile.persona.spokes.permission.tools]
+"memory_*"             = "allow"
 "bridge_*"             = "allow"
 "hcp_*"                = "allow"
+"persona_*"            = "allow"
 "touch_*"              = "allow"
 "canvas_*"             = "allow"
 "federation_peers"     = "allow"
@@ -89,25 +97,32 @@ default = "deny"
 "grep"  = "allow"
 "find" = "allow"
 "ls" = "allow"
-[profile.persona.faces.permission.tools.read]
+[profile.persona.spokes.permission.tools.read]
 "*" = "deny"
 "/work/config/*" = "allow"
 "/work/tests/*" = "allow"
 "~/.pi/agent/**" = "allow"
 "/tmp/pi-output/**" = "allow"
-[profile.persona.faces.permission.tools.persona_trait_edit]
+# EVERY TOOL THAT CAN CHANGE SOUL.md, and the rule is keyed on the PATH the tool takes -- which
+# now carries its directory (`traits/SOUL.md`, not `SOUL.md`). a rule keyed on the old bare name
+# would not match, and a permission rule that does not match fails OPEN: the gate is simply absent
+# and looks exactly like a policy nobody wrote. see docs/MIGRATION.md in the hmux repo.
+[profile.persona.spokes.permission.tools.memory_write]
 "*" = "allow"
-"SOUL.md" = "ask"
-[profile.persona.faces.permission.tools.persona_trait_write]
+"traits/SOUL.md" = "ask"
+[profile.persona.spokes.permission.tools.memory_edit]
 "*" = "allow"
-"SOUL.md" = "ask"
-[profile.persona.faces.permission.tools.persona_trait_append]
+"traits/SOUL.md" = "ask"
+[profile.persona.spokes.permission.tools.memory_append]
 "*" = "allow"
-"SOUL.md" = "ask"
-[profile.persona.faces.permission.tools.persona_trait_delete]
+"traits/SOUL.md" = "ask"
+[profile.persona.spokes.permission.tools.memory_delete]
 "*" = "allow"
-"SOUL.md" = "ask"
-[profile.persona.faces.permission.bash]
+"traits/SOUL.md" = "ask"
+[profile.persona.spokes.permission.tools.memory_move]
+"*" = "allow"
+"traits/SOUL.md" = "ask"
+[profile.persona.spokes.permission.bash]
 "*" = "deny"
 "/work/tests/*"        = "allow"
 "head *"               = "allow"
@@ -140,10 +155,10 @@ default = "deny"
 "browser-use tab *"       = "allow"
 "browser-use tab close *" = "ask"
 "browser-use open *"      = "allow"
-[profile.persona.faces.permission.external]
+[profile.persona.spokes.permission.external]
 "*" = "deny"
 "/work/**" = "allow"
 "~/.pi/agent/**" = "allow"
 "/tmp/pi-output/**" = "allow"
-[profile.persona.faces.permission.identity.federation]
+[profile.persona.spokes.permission.identity.federation]
 default = "deny"

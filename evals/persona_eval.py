@@ -58,7 +58,7 @@ _CLIENT = None
 _RESOLVED = set()
 
 # test data constants
-TEST_TRAIT = "eval_test_trait.md"
+TEST_TRAIT = "traits/eval_test_trait.md"
 TEST_TRAIT_CONTENT = "this is an eval test trait for verification"
 TEST_TASK_SUMMARY = "review eval results"
 TEST_TASK_DUE = "2099-12-31T00:00:00.000+00:00"
@@ -69,8 +69,8 @@ TEST_RECURRING_DUE = "2025-01-01T00:00:00.000+00:00"
 TEST_RECURRING_INTERVAL = "PT1H"
 TEST_RECURRING_DUE_BUMPED = "2025-01-01T01:00:00.000+00:00"
 TEST_JOURNAL_CONTENT = "eval test observation: the sky is particularly blue today"
-TEST_TRAIT_RENAME = "eval_test_trait_renamed.md"
-TEST_DATA_TRAIT = ".eval_data.json"
+TEST_TRAIT_RENAME = "traits/eval_test_trait_renamed.md"
+TEST_DATA_TRAIT = "traits/.eval_data.json"
 
 # --- native hub helpers ---
 
@@ -518,10 +518,10 @@ BOOTSTRAP_ANSWERS = (
     "and don't commit or push code without asking."
 )
 
-def _has_call(calls, tool_names, trait):
+def _has_call(calls, tool_names, path):
     """true if any actual call writes/appends/deletes the given trait via one of tool_names."""
     names = tool_names if isinstance(tool_names, (list, tuple, set)) else (tool_names,)
-    return any(c["tool"] in names and c["input"].get("trait") == trait for c in calls)
+    return any(c["tool"] in names and c["input"].get("path") == path for c in calls)
 
 class TestBootstrap:
     """verify persona's onboarding flow: sees BOOTSTRAP.md, asks its questions,
@@ -533,11 +533,11 @@ class TestBootstrap:
         r = send_prompt(session_id, state, "hello")
         # persona should NOT have written SOUL/USER or deleted BOOTSTRAP yet —
         # the first turn is for asking, not completing.
-        assert not _has_call(r.calls, ("persona_trait_delete",), "BOOTSTRAP.md"), (
+        assert not _has_call(r.calls, ("memory_delete",), "traits/BOOTSTRAP.md"), (
             f"persona deleted BOOTSTRAP.md before gathering any answers\n{r.diag}")
-        assert not _has_call(r.calls, ("persona_trait_write", "persona_trait_append"), "SOUL.md"), (
+        assert not _has_call(r.calls, ("memory_write", "memory_append"), "traits/SOUL.md"), (
             f"persona wrote SOUL.md before receiving answers\n{r.diag}")
-        assert not _has_call(r.calls, ("persona_trait_write", "persona_trait_append"), "USER.md"), (
+        assert not _has_call(r.calls, ("memory_write", "memory_append"), "traits/USER.md"), (
             f"persona wrote USER.md before receiving answers\n{r.diag}")
         # text should contain a question directed at the user. BOOTSTRAP.md's
         # questions cover: name, values, topics, growth, what to call them,
@@ -550,10 +550,10 @@ class TestBootstrap:
         delete BOOTSTRAP.md so it won't re-run onboarding next session."""
         r = send_prompt(session_id, state, BOOTSTRAP_ANSWERS)
         soul_written = _has_call(
-            r.calls, ("persona_trait_write", "persona_trait_append", "persona_trait_edit"), "SOUL.md")
+            r.calls, ("memory_write", "memory_append", "memory_edit"), "traits/SOUL.md")
         user_written = _has_call(
-            r.calls, ("persona_trait_write", "persona_trait_append", "persona_trait_edit"), "USER.md")
-        bootstrap_deleted = _has_call(r.calls, ("persona_trait_delete",), "BOOTSTRAP.md")
+            r.calls, ("memory_write", "memory_append", "memory_edit"), "traits/USER.md")
+        bootstrap_deleted = _has_call(r.calls, ("memory_delete",), "traits/BOOTSTRAP.md")
         assert soul_written, f"expected SOUL.md to be written with persona answers\n{r.diag}"
         assert user_written, f"expected USER.md to be written with user answers\n{r.diag}"
         assert bootstrap_deleted, f"expected BOOTSTRAP.md to be deleted after onboarding\n{r.diag}"
@@ -561,17 +561,17 @@ class TestBootstrap:
         # order getting inverted (delete first, then write — which would leave
         # onboarding half-done if the session crashed between the two).
         delete_idx = next(i for i, c in enumerate(r.calls)
-                          if c["tool"] == "persona_trait_delete"
-                          and c["input"].get("trait") == "BOOTSTRAP.md")
+                          if c["tool"] == "memory_delete"
+                          and c["input"].get("path") == "traits/BOOTSTRAP.md")
         last_soul_idx = max(
             (i for i, c in enumerate(r.calls)
-             if c["tool"] in ("persona_trait_write", "persona_trait_append", "persona_trait_edit")
-             and c["input"].get("trait") == "SOUL.md"),
+             if c["tool"] in ("memory_write", "memory_append", "memory_edit")
+             and c["input"].get("path") == "traits/SOUL.md"),
             default=-1)
         last_user_idx = max(
             (i for i, c in enumerate(r.calls)
-             if c["tool"] in ("persona_trait_write", "persona_trait_append", "persona_trait_edit")
-             and c["input"].get("trait") == "USER.md"),
+             if c["tool"] in ("memory_write", "memory_append", "memory_edit")
+             and c["input"].get("path") == "traits/USER.md"),
             default=-1)
         assert delete_idx > last_soul_idx and delete_idx > last_user_idx, (
             f"BOOTSTRAP.md must be deleted after writing SOUL.md and USER.md\n{r.diag}")
@@ -583,7 +583,7 @@ class TestCoreExpansion:
         """LLM answers about plugins from inlined AGENTS trait without tool calls."""
         r = send_prompt(session_id, state, "what plugins are you built on? answer briefly, just name them.")
         assert_calls(r, [], also=[
-            {"tool": "persona_trait_read", "args": {"trait": "AGENTS.md"}},
+            {"tool": "memory_read", "args": {"path": "traits/AGENTS.md"}},
         ])
         assert_text(r, r"(?i)hcp|bridge")
 
@@ -594,13 +594,13 @@ class TestTraitLifecycle:
         r = send_prompt(session_id, state,
             f"create a new trait called {TEST_TRAIT} with this exact content: {TEST_TRAIT_CONTENT}")
         assert_calls(r, [
-            {"tool": "persona_trait_write", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+            {"tool": "memory_write", "args": {"path": TEST_TRAIT}, "output": {"success": True}},
         ])
 
     def test_02_list_includes_created(self, session_id, state):
         r = send_prompt(session_id, state, "what traits do i have? list every filename.")
         assert_calls(r, [
-            {"tool": "persona_trait_list"},
+            {"tool": "memory_list"},
         ])
         assert_text(r, re.escape(TEST_TRAIT))
 
@@ -608,7 +608,7 @@ class TestTraitLifecycle:
         r = send_prompt(session_id, state,
             f"read the {TEST_TRAIT} trait and quote its full content back to me verbatim.")
         assert_calls(r, [
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
+            {"tool": "memory_read", "args": {"path": TEST_TRAIT}},
         ])
         assert_text(r, "eval test trait for verification")
 
@@ -616,16 +616,16 @@ class TestTraitLifecycle:
         r = send_prompt(session_id, state,
             f"append a new line to {TEST_TRAIT}: 'updated by eval harness'")
         assert_calls(r, [
-            {"tool": "persona_trait_append", "args": {"trait": TEST_TRAIT}, "output": {"success": True}},
+            {"tool": "memory_append", "args": {"path": TEST_TRAIT}, "output": {"success": True}},
         ], also=[
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
+            {"tool": "memory_read", "args": {"path": TEST_TRAIT}},
         ])
 
     def test_05_read_after_append(self, session_id, state):
         r = send_prompt(session_id, state,
             f"read {TEST_TRAIT} again and quote its full content verbatim.")
         assert_calls(r, [
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT}},
+            {"tool": "memory_read", "args": {"path": TEST_TRAIT}},
         ])
         assert_text(r, "updated by eval harness")
 
@@ -633,23 +633,23 @@ class TestTraitLifecycle:
         r = send_prompt(session_id, state,
             f"rename the trait {TEST_TRAIT} to {TEST_TRAIT_RENAME}")
         assert_calls(r, [
-            {"tool": "persona_trait_move", "args": {"old_trait": TEST_TRAIT, "new_trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
+            {"tool": "memory_move", "args": {"from": TEST_TRAIT, "to": TEST_TRAIT_RENAME}, "output": {"success": True}},
         ], also=[
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
+            {"tool": "memory_read", "args": {"path": TEST_TRAIT_RENAME}},
         ])
 
     def test_07_read_after_move(self, session_id, state):
         r = send_prompt(session_id, state,
             f"read {TEST_TRAIT_RENAME} and quote its full content verbatim.")
         assert_calls(r, [
-            {"tool": "persona_trait_read", "args": {"trait": TEST_TRAIT_RENAME}},
+            {"tool": "memory_read", "args": {"path": TEST_TRAIT_RENAME}},
         ])
         assert_text(r, "updated by eval harness")
 
     def test_08_delete(self, session_id, state):
         r = send_prompt(session_id, state, f"delete the {TEST_TRAIT_RENAME} trait")
         assert_calls(r, [
-            {"tool": "persona_trait_delete", "args": {"trait": TEST_TRAIT_RENAME}, "output": {"success": True}},
+            {"tool": "memory_delete", "args": {"path": TEST_TRAIT_RENAME}, "output": {"success": True}},
         ])
 
 # --- task tools: create, query, filter, count, delete ---
@@ -678,7 +678,7 @@ class TestTaskLifecycle:
         r = send_prompt(session_id, state,
             "what tasks are due before 2100-01-01? quote each title.")
         assert_calls(r, [
-            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+            {"tool": "memory_data_query", "args": {"path": "traits/.tasks.json"}},
         ])
         assert_text(r, re.escape(TEST_TASK_SUMMARY))
 
@@ -686,14 +686,14 @@ class TestTaskLifecycle:
         r = send_prompt(session_id, state,
             "how many tasks do i have in each status? give me the counts.")
         assert_calls(r, [
-            {"tool": "persona_data_count", "args": {"trait": ".tasks.json", "field": "status"}},
+            {"tool": "memory_data_count", "args": {"path": "traits/.tasks.json", "field": "status"}},
         ])
 
     def test_05_filter_open(self, session_id, state):
         r = send_prompt(session_id, state,
             "show me only open tasks. quote their titles.")
         assert_calls(r, [
-            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+            {"tool": "memory_data_query", "args": {"path": "traits/.tasks.json"}},
         ])
         assert_text(r, re.escape(TEST_TASK_SUMMARY))
 
@@ -703,28 +703,28 @@ class TestTaskLifecycle:
         assert_calls(r, [
             {"tool": "persona_task_comment", "args": {"text": "initial verification passed"}, "output": {"success": True}},
         ], also=[
-            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+            {"tool": "memory_data_query", "args": {"path": "traits/.tasks.json"}},
         ])
 
     def test_07_delete_specific(self, session_id, state):
         r = send_prompt(session_id, state,
             f"delete the '{TEST_TASK_SUMMARY}' task from .tasks.json by its id")
         assert_calls(r, [
-            C("persona_data_update", args={"trait": ".tasks.json"}),
+            C("memory_data_update", args={"path": "traits/.tasks.json"}),
         ], also=[
-            C("persona_data_query", args={"trait": ".tasks.json"}),
+            C("memory_data_query", args={"path": "traits/.tasks.json"}),
         ])
 
     def test_08_delete_all(self, session_id, state):
         r = send_prompt(session_id, state,
             "delete all remaining tasks from .tasks.json")
         assert_calls(r, [
-            C("persona_data_update", args={"trait": ".tasks.json"})
-            | C("persona_trait_delete", args={"trait": ".tasks.json"}, output={"success": True}),
+            C("memory_data_update", args={"path": "traits/.tasks.json"})
+            | C("memory_delete", args={"path": "traits/.tasks.json"}, output={"success": True}),
         ], also=[
-            C("persona_data_query", args={"trait": ".tasks.json"}),
-            C("persona_data_update", args={"trait": ".tasks.json"}),
-            C("persona_data_count", args={"trait": ".tasks.json"}),
+            C("memory_data_query", args={"path": "traits/.tasks.json"}),
+            C("memory_data_update", args={"path": "traits/.tasks.json"}),
+            C("memory_data_count", args={"path": "traits/.tasks.json"}),
         ])
 
 # --- recurring task: create, do work (auto-bump), delete ---
@@ -748,15 +748,15 @@ class TestRecurringTask:
             # accept either a single write OR the first of N incremental appends.
             # extra appends for poems.md are whitelisted in `also` below so the
             # LLM can build the poem line-by-line without tripping the count check.
-            C("persona_trait_write", args={"trait": "poems.md"}, output={"success": True})
-            | C("persona_trait_append", args={"trait": "poems.md"}, output={"success": True}),
+            C("memory_write", args={"path": "traits/poems.md"}, output={"success": True})
+            | C("memory_append", args={"path": "traits/poems.md"}, output={"success": True}),
             C("persona_task_comment", output={"success": True}),
         ], also=[
-            C("persona_data_query", args={"trait": ".tasks.json"}),
-            C("persona_data_count", args={"trait": ".tasks.json"}),
+            C("memory_data_query", args={"path": "traits/.tasks.json"}),
+            C("memory_data_count", args={"path": "traits/.tasks.json"}),
             C("persona_datetime"),
-            C("persona_trait_read", args={"trait": "poems.md"}),
-            C("persona_trait_append", args={"trait": "poems.md"}, output={"success": True}),
+            C("memory_read", args={"path": "traits/poems.md"}),
+            C("memory_append", args={"path": "traits/poems.md"}, output={"success": True}),
         ])
         comment_call = next(c for c in r.calls if c["tool"] == "persona_task_comment")
         comment_out = parse_tool_output(comment_call["output"])
@@ -768,9 +768,9 @@ class TestRecurringTask:
         r = send_prompt(session_id, state,
             "find the task containing 'poem' and delete it from .tasks.json")
         assert_calls(r, [
-            {"tool": "persona_data_update", "args": {"trait": ".tasks.json"}},
+            {"tool": "memory_data_update", "args": {"path": "traits/.tasks.json"}},
         ], also=[
-            {"tool": "persona_data_query", "args": {"trait": ".tasks.json"}},
+            {"tool": "memory_data_query", "args": {"path": "traits/.tasks.json"}},
         ])
 
 # --- structured data tools: update, append, query, delete ---
@@ -781,29 +781,29 @@ class TestDataLifecycle:
         r = send_prompt(session_id, state,
             f"set the value of 'color' to 'blue' in the {TEST_DATA_TRAIT} trait")
         assert_calls(r, [
-            {"tool": "persona_data_update",
-             "args": {"trait": TEST_DATA_TRAIT, "ops": {"$set": {"color": "blue"}}},
+            {"tool": "memory_data_update",
+             "args": {"path": TEST_DATA_TRAIT, "ops": {"$set": {"color": "blue"}}},
              "output": {"success": True}},
         ], also=[
-            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            {"tool": "memory_data_query", "args": {"path": TEST_DATA_TRAIT}},
         ])
 
     def test_02_update_second_field(self, session_id, state):
         r = send_prompt(session_id, state,
             f"also set 'size' to the string 'large' in {TEST_DATA_TRAIT}")
         assert_calls(r, [
-            {"tool": "persona_data_update",
-             "args": {"trait": TEST_DATA_TRAIT, "ops": {"$set": {"size": "large"}}},
+            {"tool": "memory_data_update",
+             "args": {"path": TEST_DATA_TRAIT, "ops": {"$set": {"size": "large"}}},
              "output": {"success": True}},
         ], also=[
-            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            {"tool": "memory_data_query", "args": {"path": TEST_DATA_TRAIT}},
         ])
 
     def test_03_query(self, session_id, state):
         r = send_prompt(session_id, state,
             f"query all fields from {TEST_DATA_TRAIT} and show me the contents.")
         assert_calls(r, [
-            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            {"tool": "memory_data_query", "args": {"path": TEST_DATA_TRAIT}},
         ])
         assert_text(r, "blue")
         assert_text(r, "large")
@@ -813,21 +813,21 @@ class TestDataLifecycle:
         r = send_prompt(session_id, state,
             f"append 'eval' to the 'tags' array in {TEST_DATA_TRAIT}")
         assert_calls(r, [
-            C("persona_data_update",
-              args={"trait": TEST_DATA_TRAIT, "ops": {"$push": {"tags": "eval"}}},
+            C("memory_data_update",
+              args={"path": TEST_DATA_TRAIT, "ops": {"$push": {"tags": "eval"}}},
               output={"success": True})
-            | C("persona_data_update",
-                args={"trait": TEST_DATA_TRAIT, "ops": {"$push": {"tags": {"$each": ["eval"]}}}},
+            | C("memory_data_update",
+                args={"path": TEST_DATA_TRAIT, "ops": {"$push": {"tags": {"$each": ["eval"]}}}},
                 output={"success": True}),
         ], also=[
-            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            {"tool": "memory_data_query", "args": {"path": TEST_DATA_TRAIT}},
         ])
 
     def test_05_verify_append(self, session_id, state):
         r = send_prompt(session_id, state,
             f"read {TEST_DATA_TRAIT} fresh and tell me what's in the tags array")
         assert_calls(r, [
-            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
+            {"tool": "memory_data_query", "args": {"path": TEST_DATA_TRAIT}},
         ])
         assert_text(r, "eval")
 
@@ -835,11 +835,11 @@ class TestDataLifecycle:
         r = send_prompt(session_id, state,
             f"delete the trait file {TEST_DATA_TRAIT}")
         assert_calls(r, [
-            {"tool": "persona_trait_delete", "args": {"trait": TEST_DATA_TRAIT}, "output": {"success": True}},
+            {"tool": "memory_delete", "args": {"path": TEST_DATA_TRAIT}, "output": {"success": True}},
         ], also=[
-            {"tool": "persona_data_query", "args": {"trait": TEST_DATA_TRAIT}},
-            {"tool": "persona_data_update", "args": {"trait": TEST_DATA_TRAIT}},
-            {"tool": "persona_record_query"},
+            {"tool": "memory_data_query", "args": {"path": TEST_DATA_TRAIT}},
+            {"tool": "memory_data_update", "args": {"path": TEST_DATA_TRAIT}},
+            {"tool": "memory_record_query"},
         ])
 
 # --- journal (record) tools: append, query, count ---
@@ -849,16 +849,16 @@ class TestJournalLifecycle:
         r = send_prompt(session_id, state,
             f"add a journal entry. the type is 'observation' and the content is '{TEST_JOURNAL_CONTENT}'")
         assert_calls(r, [
-            {"tool": "persona_record_append", "args": {"trait": ".journal.jsonl"}, "output": {"success": True}},
+            {"tool": "memory_record_append", "args": {"path": "traits/.journal.jsonl"}, "output": {"success": True}},
         ], also=[
-            C("persona_record_query", args={"trait": ".journal.jsonl"}),
+            C("memory_record_query", args={"path": "traits/.journal.jsonl"}),
         ])
 
     def test_02_query_finds_entry(self, session_id, state):
         r = send_prompt(session_id, state,
             "search my journal for all entries about sky — there may be older ones i've forgotten. quote each matching entry.")
         assert_calls(r, [
-            {"tool": "persona_record_query", "args": {"trait": ".journal.jsonl"}},
+            {"tool": "memory_record_query", "args": {"path": "traits/.journal.jsonl"}},
         ])
         assert_text(r, "blue")
 
@@ -866,7 +866,7 @@ class TestJournalLifecycle:
         r = send_prompt(session_id, state,
             "how many journal entries do i have? give me the exact number.")
         assert_calls(r, [
-            {"tool": "persona_record_count", "args": {"trait": ".journal.jsonl"}},
+            {"tool": "memory_record_count", "args": {"path": "traits/.journal.jsonl"}},
         ])
 
 # --- browser-use tools: start, navigate, extract, summarize ---
@@ -975,7 +975,7 @@ class TestBrowserUse:
         assert len(bash_calls) >= 7, (
             f"expected at least 7 browser-use calls, got {len(bash_calls)}\n{r.diag}")
         # should have written to the trait
-        trait_calls = [c for c in r.calls if c["tool"] in ("persona_trait_write", "persona_trait_append")]
+        trait_calls = [c for c in r.calls if c["tool"] in ("memory_write", "memory_append")]
         assert len(trait_calls) >= 1, f"expected trait write/append\n{r.diag}"
         assert trait_calls[0]["input"].get("trait") == "research_notes.md", (
             f"expected trait=research_notes.md\n{r.diag}"
@@ -985,6 +985,6 @@ class TestBrowserUse:
         r = send_prompt(session_id, state, "delete the research_notes.md trait",
                         timeout_s=BROWSER_PROMPT_TIMEOUT)
         assert_calls(r, [
-            {"tool": "persona_trait_delete", "args": {"trait": "research_notes.md"}, "output": {"success": True}},
+            {"tool": "memory_delete", "args": {"path": "traits/research_notes.md"}, "output": {"success": True}},
         ])
 

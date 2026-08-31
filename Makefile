@@ -84,12 +84,18 @@ image build:
 # file to exist -- so seed it from the example, whose every line is commented and therefore changes
 # nothing. a fresh clone comes up without an editing step.
 #
-# hmux/config.local.toml is seeded the same way and for the same reason -- a bind mount of a file
-# that does not exist creates a DIRECTORY, and the config would then fail to parse. empty means the
-# merge sets nothing, so a clone that never touches it behaves exactly as before.
+# volumes/hmux/config.local.toml is seeded the same way and for the same reason -- a bind mount of a
+# file that does not exist creates a DIRECTORY, and the config would then fail to parse. empty means
+# the merge sets nothing, so a clone that never touches it behaves exactly as before.
+#
+# THE EXAMPLE STAYS IN `hmux/` AND THE LIVE COPY LIVES IN `volumes/`, which is the whole point of
+# the split: `hmux/` is what the repo ships (the image's `config.toml` and this example), `volumes/`
+# is what this box has become and is gitignored whole. seeding across the two is what keeps a fresh
+# clone working, so the SOURCE and the DESTINATION are deliberately in different directories here.
 up:
 	@test -f persona.env || { cp persona.env.example persona.env; echo "seeded persona.env from persona.env.example"; }
-	@test -f hmux/config.local.toml || { cp hmux/config.local.toml.example hmux/config.local.toml; echo "seeded hmux/config.local.toml from hmux/config.local.toml.example"; }
+	@mkdir -p volumes/hmux
+	@test -f volumes/hmux/config.local.toml || { cp hmux/config.local.toml.example volumes/hmux/config.local.toml; echo "seeded volumes/hmux/config.local.toml from hmux/config.local.toml.example"; }
 	$(COMPOSE) $(COMPOSE_RUN_ARGS) up -d
 .PHONY: up
 

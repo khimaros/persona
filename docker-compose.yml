@@ -55,9 +55,9 @@ services:
       # survives a `down -v`, which is how a deploy that prunes wiped the agent's memory. both
       # are gitignored. the eval replaces them with throwaway named volumes, since an eval run
       # must never write the real workspace (see docker-compose.eval.yml).
-      - ./data:/data                                 # HOME: pi config, auth, sessions
-      - ./work:/work                                 # workspace (traits/hooks/prompts/...)
-      - ./hmux/config.local.toml:/config/config.local.toml:ro
+      - ./volumes/data:/data                                 # HOME: pi config, auth, sessions
+      - ./volumes/work:/work                                 # workspace (traits/hooks/prompts/...)
+      - ./volumes/hmux/config.local.toml:/config/config.local.toml:ro
       # the host X11 socket: with $DISPLAY forwarded (below) the container's chrome renders on
       # your desktop, so `make browser-head` opens a HEADED, shared browser. harmless when the
       # host has no X (an empty $DISPLAY keeps browser-use headless). see the browser-head target.

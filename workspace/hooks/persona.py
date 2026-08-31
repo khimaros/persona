@@ -1,35 +1,44 @@
 #!/usr/bin/env python3
-"""persona hook dispatcher."""
+"""persona hook dispatcher.
 
-import json, os, re, sys, uuid
+WHAT THIS FILE STOPPED BEING (hmux phase 74). it used to be a storage engine: seven trait tools,
+three document tools, three record tools, a mongo-style filter evaluator and a dot-path updater --
+about seventy per cent of it. all of that moved into hmux's `memory` face, which serves the same
+files to the model as `memory_*` tools and to everything else over http. what is left is POLICY:
+what `SOUL.md` MEANS, how a system prompt is composed from it, and what a task is.
+
+AND IT TOUCHES NO FILE DIRECTLY, not even to read one. that was argued the other way first --
+whole-file reads have no logic to duplicate and cannot fail -- and what settled it is that the
+memory root is going to be REORGANISED (`/work/memory/traits/`, `/work/memory/touch/`), and a hook
+that globs `WORKSPACE/traits` breaks the day it moves. reading through the endpoint makes the layout
+memory's business and nobody else's. it also deletes the second copy of the visibility rule:
+ALLCAPS-inlines / lowercase-is-listed / .dotted-is-hidden is memory's now, and a listing reports it.
+
+the endpoint arrives in each stage's payload as `host.memory`, beside the `cwd` that was always
+there.
+"""
+
+import json, os, re, sys, urllib.error, urllib.parse, urllib.request, uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Annotated, TypedDict, get_type_hints
 
-# workspace layout: traits/ for persona files, prompts/ for the prompt contract the
-# hook reads itself (v3: the host injects no prompts). the heartbeat is host-owned end to
-# end (hmux schedules/persists it); the hook just returns the beat prompt when fired.
-WORKSPACE = Path(__file__).resolve().parent.parent
-TRAITS = WORKSPACE / "traits"
-PROMPTS = WORKSPACE / "prompts"
+# where the store is, learned from each hook's payload (`host.memory`). the env var is the manual
+# fallback: running a stage by hand, and the contract test, which has no host to be told by.
+MEMORY = os.environ.get("HMUX_MEMORY", "")
+# how long to wait on it. WELL INSIDE the host's 30s hook cap, so a wedged memory face costs a
+# stage a moment and reports a sentence, rather than the whole budget and a timeout that reads
+# like a hang.
+MEMORY_TIMEOUT = 5
+
+# the two directories persona knows by name. everything else about the layout is memory's.
+TRAITS = "traits"
+PROMPTS = "prompts"
 AVATAR = "🌀"
 ISO_DT_DESC = "ISO 8601 datetime with timezone offset (e.g. 2026-04-01T09:00:00.000+00:00)"
 ISO_DUR_DESC = "ISO 8601 duration (e.g. P1D, P1W, P1M, P1Y, PT1H, PT30M)"
-DEFAULT_READ_LIMIT = 2000
-TASKS_TRAIT = ".tasks.json"
-TASK_COMMENTS_TRAIT = ".tasks_comments.jsonl"
+TASKS_TRAIT = f"{TRAITS}/.tasks.json"
+TASK_COMMENTS_TRAIT = f"{TRAITS}/.tasks_comments.jsonl"
 TASK_STATUSES = ["open", "in_progress", "blocked", "closed", "wontfix"]
-
-# shared parameter descriptions
-FILTER_JSON_DESC = 'MongoDB-style filter object (not a string). exact match: {"status": "open"}, date comparison: {"due": {"$lt": "2100-01-01T00:00:00.000+00:00"}}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. top-level keys are AND. "id" matches dict keys'
-FILTER_JSONL_DESC = 'MongoDB-style filter object (not a string). exact match: {type: "note"}, operators: $in, $lt, $gt, $lte, $gte, $regex, $not, $or, $exists. dot-paths for nested fields: {"meta.source": "web"}. top-level keys are AND'
-FIELDS_JSON_DESC = 'array of field names to return (not a string). example: ["title", "status"]. NOT for filtering. omit to return all fields'
-FIELDS_JSONL_DESC = 'array of field names to return (not a string). example: ["type", "content"]. NOT for filtering. omit to return all fields'
-TRAIT_JSON_DESC = "trait filename in traits/, must end in .json (e.g. .tasks.json)"
-TRAIT_JSONL_DESC = "trait filename in traits/, must end in .jsonl (e.g. .journal.jsonl)"
-TRAIT_DESC = "trait path in traits/ (e.g. SOUL.md, sub/topic.md)"
-OPS_DESC = 'MongoDB-style update operators (not a string). supported: $set, $push, $unset. each maps dot-path -> value. paths are field names (e.g. "color", "nested.size", "arr.0") - the whole document cannot be addressed, use persona_trait_write to replace or persona_trait_delete to remove the file. examples: {"$set": {"color": "blue", "nested.size": "large"}} sets fields; {"$push": {"tags": "eval"}} appends to an array (use {"$each": [a, b]} to push multiple); {"$unset": {"color": ""}} removes a field. combine operators in one call: {"$set": {...}, "$push": {...}}. string values must be JSON-encoded.'
-KEY_DESC = 'dot-path selector for a field within the document (e.g. color, nested.key, arr.0). omit to return the whole document'
 
 class HookResult(TypedDict, total=False):
     system: list[str]
@@ -69,7 +78,7 @@ def tool(fn=None, *, permission=None, name=None):
         return decorator(fn)
     return decorator
 
-# emit a JSONL log line to stdout (picked up by the plugin)
+# emit a JSONL log line to stdout (picked up by the host)
 def debug(msg):
     print(json.dumps({"log": f"[{AVATAR}] {msg}"}), flush=True)
 
@@ -84,746 +93,148 @@ def result_err(msg):
     """structured error response."""
     return json.dumps({"error": msg})
 
-# --- trait helpers ---
+# --- the memory endpoint ---
 
-# trait visibility: ALLCAPS = inlined in system prompt (letters, digits, _, .),
-# lowercase = listed (read on demand), .hidden = unlisted
-def is_hidden(name):
-    return name.startswith(".")
+class MemoryError(Exception):
+    """the store could not answer. carries a sentence a model can act on."""
 
-def is_core(name):
-    stem = Path(name).stem
-    stripped = re.sub(r"[_.0-9]", "", stem)
-    return stem == stem.upper() and len(stripped) > 0 and stripped.isalpha()
+def _mem(method, path="", body=None, **query):
+    """one request to the memory face.
 
-def trait_names(include_hidden=False):
-    return sorted(
-        str(f.relative_to(TRAITS)) for f in TRAITS.rglob("*")
-        if f.is_file() and (include_hidden or not is_hidden(f.name))
-    )
-
-def core_trait_names():
-    return [n for n in trait_names() if is_core(n)]
-
-def listed_trait_names():
-    return [n for n in trait_names() if not is_core(n)]
-
-def trait_path(name):
-    """resolve trait name to path, rejecting traversal outside TRAITS/."""
-    resolved = (TRAITS / name).resolve()
-    if not resolved.parts or not str(resolved).startswith(str(TRAITS.resolve())):
-        raise ValueError(f"invalid trait path: {name}")
-    return resolved
-
-def cleanup_empty_parents(path):
-    """remove empty ancestor directories up to (but not including) TRAITS/."""
-    parent = path.parent
-    while parent != TRAITS and parent.is_dir():
-        try:
-            parent.rmdir()
-        except OSError:
-            break
-        parent = parent.parent
-
-def format_trait(name):
+    RAISES RATHER THAN RETURNING A SENTINEL, so a caller cannot mistake "the store is down" for
+    "the file is empty" -- which is the difference between an error worth retrying and a system
+    prompt composed from nothing.
+    """
+    if not MEMORY:
+        raise MemoryError("no memory face is configured for this deployment")
+    url = f"{MEMORY.rstrip('/')}/t"
+    if path:
+        url += "/" + path.lstrip("/")
+    if query:
+        clean = {k: v for k, v in query.items() if v not in (None, "")}
+        if clean:
+            url += "?" + urllib.parse.urlencode(clean)
+    data = None
+    if body is not None:
+        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        ctype = "application/octet-stream" if isinstance(body, str) else "application/json"
+        req.add_header("content-type", ctype)
     try:
-        content = trait_path(name).read_text()
-    except FileNotFoundError:
-        content = "(empty)"
-    return f"\n{{trait:{name}}}\n{content}\n"
+        with urllib.request.urlopen(req, timeout=MEMORY_TIMEOUT) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = json.loads(e.read()).get("error", "")
+        except Exception:  # noqa: BLE001
+            pass
+        raise MemoryError(detail or f"memory: http {e.code}") from e
+    except Exception as e:  # noqa: BLE001
+        raise MemoryError(f"memory: {e}") from e
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.decode("utf-8", "replace")
 
-# --- prompt helpers (v3: the hook owns its prompts) ---
+def _index(content=None):
+    """every path memory holds, with its visibility and revision.
 
-def prompt_path(name):
-    """resolve a prompt name to a path under PROMPTS/, rejecting traversal."""
-    resolved = (PROMPTS / name).resolve()
-    if not str(resolved).startswith(str(PROMPTS.resolve())):
-        raise ValueError(f"invalid prompt path: {name}")
-    return resolved
+    ONE ROUND TRIP FOR A WHOLE SYSTEM PROMPT when `content=core`: the bytes of the shouting files
+    come back inline and everything else is named. that endpoint parameter exists for this caller.
+    """
+    got = _mem("GET", "", content=content) or {}
+    return got.get("entries", [])
 
-def load_prompts(ctx):
-    """the prompt contract. v3 reads prompts/ directly; a v2 host still injects them
-    via ctx.prompts, so prefer that when present."""
-    injected = ctx.get("prompts")
-    if injected:
-        return injected
+# --- prompt + trait composition (persona's actual job) ---
+
+def _named(entries, prefix, suffix=""):
+    """the entries under `prefix/`, as {short name: entry}."""
     out = {}
-    if PROMPTS.is_dir():
-        for f in sorted(PROMPTS.glob("*.md")):
-            out[f.stem] = f.read_text()
+    for e in entries:
+        p = e.get("path", "")
+        if p.startswith(f"{prefix}/") and p.endswith(suffix):
+            out[p[len(prefix) + 1 : len(p) - len(suffix) if suffix else len(p)]] = e
     return out
 
-# compose system prompt from preamble, mode-specific prompt, and traits. the prompt
-# bodies (preamble + mode) come from load_prompts (the hook reads prompts/ itself, v3).
-# stages without a prompt file are silently skipped.
-def system_prompt(prompts, mode=None):
+def system_prompt(mode=None):
+    """compose the system prompt: preamble, the mode's own prompt, then every core trait.
+
+    THE ORDER AND THE BYTES MUST NOT WANDER between runs -- the host freezes this per session for
+    the provider's prompt cache, and a set that reordered itself would invalidate it every time.
+    memory lists in sorted order, so this does too by construction rather than by sorting again.
+    """
+    core_index = _index(content="core")
+    # the prompt files are `listed`, not `core`, so their bytes are not in the first answer. one
+    # more call brings all of them at once rather than one call per file.
+    prompts = {n: (e.get("content") or "") for n, e in
+               _named(_index(content="listed"), PROMPTS, ".md").items()}
     parts = [prompts.get("preamble", "")]
     if mode:
         parts.append(prompts.get(mode, ""))
-    parts += [format_trait(t) for t in core_trait_names()]
-    listed = listed_trait_names()
+    core, listed = [], []
+    for name, e in _named(core_index, TRAITS).items():
+        if e.get("visibility") == "core":
+            core.append(f"\n{{trait:{name}}}\n{e.get('content') or '(empty)'}\n")
+        elif e.get("visibility") == "listed":
+            listed.append(name)
+    parts += core
     if listed:
-        formatted = ", ".join(f"{n}" for n in listed)
-        parts.append(f"\nadditional traits (use trait_read to view): {formatted}\n")
+        parts.append(
+            f"\nadditional traits (use memory_read on {TRAITS}/<name> to view): "
+            f"{', '.join(sorted(listed))}\n"
+        )
     return ["".join(p for p in parts if p)]
+
+def prompt_text(name):
+    """one prompt file's body, or "" when it is absent -- a stage with no prompt is skipped."""
+    try:
+        got = _mem("GET", f"{PROMPTS}/{name}.md")
+    except MemoryError:
+        return ""
+    return got if isinstance(got, str) else ""
 
 # persona OWNS the system prompt (the traits ARE it), so every system-bearing hook result
 # REPLACES the backend default instead of appending to it. the composed value is still frozen
 # per session host-side, so replacing does not invalidate the provider prompt cache.
 REPLACE_SYSTEM = {"system_mode": "replace"}
 
-# --- trait tools ---
-
-@tool
-def trait_list(
-    include_hidden: Annotated[str, param("include hidden (dot-prefixed) traits", type="boolean", optional=True)] = "false",
-) -> HookResult:
-    """list all traits of the persona, including those in subdirectories (shown as relative paths)"""
-    show_hidden = str(include_hidden).lower() == "true"
-    names = trait_names(include_hidden=show_hidden)
-    formatted = ", ".join(f"{{trait:{n}}}" for n in names)
-    return {"result": f"available traits: {formatted}"}
-
-@tool(permission={"arg": "trait"})
-def trait_read(
-    trait: Annotated[str, TRAIT_DESC],
-    offset: Annotated[str, param("the line number to start reading from (1-indexed)", type="number", optional=True)] = "",
-    limit: Annotated[str, param(f"the maximum number of lines to read (defaults to {DEFAULT_READ_LIMIT})", type="number", optional=True)] = "",
-) -> HookResult:
-    """read a trait from the persona"""
-    try:
-        path = trait_path(trait)
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-    try:
-        content = path.read_text()
-    except FileNotFoundError:
-        content = "(empty)"
-    lines = content.split("\n")
-    start = int(offset) - 1 if offset else 0
-    end = start + (int(limit) if limit else DEFAULT_READ_LIMIT)
-    sliced = lines[start:end]
-    header = f"\n{{trait:{trait}}}\n"
-    return {"result": header + "\n".join(sliced)}
-
-@tool(permission={"arg": "trait"})
-def trait_write(
-    trait: Annotated[str, TRAIT_DESC],
-    content: Annotated[str, "full content for the trait"],
-) -> HookResult:
-    """create or overwrite a trait in the persona. preferred for new traits or full replacements. parent directories are created automatically"""
-    try:
-        path = trait_path(trait)
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    return {"result": result_ok(), "modified": [trait],
-            "notify": [{"type": "trait_changed", "files": [trait]}]}
-
-@tool(permission={"arg": "trait"})
-def trait_edit(
-    trait: Annotated[str, TRAIT_DESC],
-    oldString: Annotated[str, "the text to replace"],
-    newString: Annotated[str, "the text to replace it with (must be different from oldString)"],
-    replaceAll: Annotated[str, param("replace all occurrences (default false)", type="boolean", optional=True)] = "false",
-) -> HookResult:
-    """edit a trait in the persona (find-and-replace)"""
-    try:
-        path = trait_path(trait)
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-    content = path.read_text()
-    n = content.count(oldString)
-    if n == 0:
-        return {"result": result_err("oldString not found")}
-    if n > 1 and str(replaceAll).lower() != "true":
-        return {"result": result_err(f"{n} matches for oldString, expected 1 (use replaceAll to replace all)")}
-    if str(replaceAll).lower() == "true":
-        path.write_text(content.replace(oldString, newString))
-        replacements = n
-    else:
-        path.write_text(content.replace(oldString, newString, 1))
-        replacements = 1
-    return {"result": result_ok({"replacements": replacements}), "modified": [trait],
-            "notify": [{"type": "trait_changed", "files": [trait]}]}
-
-@tool(permission={"arg": "trait"})
-def trait_append(
-    trait: Annotated[str, TRAIT_DESC],
-    content: Annotated[str, "text to append as a new line; a newline separator is prepended automatically, so do not include a leading newline"],
-) -> HookResult:
-    """append content as a new line at the end of an existing trait. each call adds one new line; calling twice adds two. a newline is inserted automatically before content, so callers should pass the raw text without a leading newline. use trait_write to create new traits or replace all content"""
-    try:
-        path = trait_path(trait)
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-    append_to_trait(trait, "\n" + content)
-    echo = content if len(content) <= 40 else content[:40] + "..."
-    return {"result": result_ok({"appended": echo}), "modified": [trait],
-            "notify": [{"type": "trait_changed", "files": [trait]}]}
-
-@tool(permission={"arg": "trait"})
-def trait_delete(
-    trait: Annotated[str, TRAIT_DESC],
-) -> HookResult:
-    """delete a trait file from the persona. works for any trait type (.md, .json, .jsonl). empty parent directories are removed automatically. to remove individual fields from a .json trait without deleting the whole file, use persona_data_update with $unset"""
-    try:
-        path = trait_path(trait)
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-    if not path.exists():
-        return {"result": result_err(f"not found: {trait}")}
-    path.unlink()
-    cleanup_empty_parents(path)
-    return {"result": result_ok({"deleted": 1}), "modified": [trait],
-            "notify": [{"type": "trait_changed", "files": [trait]}]}
-
-@tool(permission={"arg": ["old_trait", "new_trait"]})
-def trait_move(
-    old_trait: Annotated[str, "current " + TRAIT_DESC],
-    new_trait: Annotated[str, "new " + TRAIT_DESC],
-) -> HookResult:
-    """rename or move a trait in the persona. destination directories are created and empty source directories are removed automatically"""
-    try:
-        src = trait_path(old_trait)
-        dst = trait_path(new_trait)
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-    if not src.exists():
-        return {"result": result_err(f"not found: {old_trait}")}
-    if dst.exists():
-        return {"result": result_err(f"already exists: {new_trait}")}
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    src.rename(dst)
-    cleanup_empty_parents(src)
-    return {"result": result_ok(), "modified": [old_trait, new_trait],
-            "notify": [{"type": "trait_changed", "files": [old_trait, new_trait]}]}
-
-# --- generic structured data tools (.json traits) ---
-
-def valid_key(key):
-    """reject empty or all-dot keys; a field path must have at least one segment."""
-    return bool(key) and bool(key.strip(".")) and all(p for p in key.strip(".").split("."))
-
-def resolve_key(data, key):
-    """walk a dot-path key, returning (parent, final_key, exists)."""
-    parts = key.strip(".").split(".")
-    current = data
-    for part in parts[:-1]:
-        if isinstance(current, list):
-            try:
-                current = current[int(part)]
-            except (ValueError, IndexError):
-                return None, None, False
-        elif isinstance(current, dict):
-            if part not in current:
-                return None, None, False
-            current = current[part]
-        else:
-            return None, None, False
-    return current, parts[-1], True
-
-def get_at_key(data, key):
-    """get value at dot-path key."""
-    parent, final, exists = resolve_key(data, key)
-    if not exists:
-        return None
-    if isinstance(parent, list):
-        try:
-            return parent[int(final)]
-        except (ValueError, IndexError):
-            return None
-    if isinstance(parent, dict):
-        return parent.get(final)
-    return None
-
-def delete_at_key(data, key):
-    """delete value at dot-path key, returning success."""
-    parent, final, exists = resolve_key(data, key)
-    if not exists or parent is None:
-        return data, False
-    if isinstance(parent, list):
-        try:
-            del parent[int(final)]
-            return data, True
-        except (ValueError, IndexError):
-            return data, False
-    if isinstance(parent, dict):
-        if final not in parent:
-            return data, False
-        del parent[final]
-        return data, True
-    return data, False
-
-def deep_set(data, key, value):
-    """set value at dot-path, auto-creating intermediate dicts (mongo $set semantics)."""
-    parts = key.strip(".").split(".")
-    current = data
-    for part in parts[:-1]:
-        if isinstance(current, list):
-            try:
-                current = current[int(part)]
-            except (ValueError, IndexError):
-                return data, False
-        elif isinstance(current, dict):
-            if part not in current or not isinstance(current[part], (dict, list)):
-                current[part] = {}
-            current = current[part]
-        else:
-            return data, False
-    final = parts[-1]
-    if isinstance(current, list):
-        try:
-            current[int(final)] = value
-            return data, True
-        except (ValueError, IndexError):
-            return data, False
-    if isinstance(current, dict):
-        current[final] = value
-        return data, True
-    return data, False
-
-def deep_push(data, key, items):
-    """push items to array at dot-path, auto-creating the array if absent."""
-    target = get_at_key(data, key)
-    if target is None:
-        data, ok = deep_set(data, key, list(items))
-        return data, ok
-    if not isinstance(target, list):
-        return data, False
-    target.extend(items)
-    return data, True
-
-def load_json_trait(name):
-    """load a .json trait, enforcing extension. read_text stays outside the
-    try so a missing file raises FileNotFoundError (callers auto-create)."""
-    if not name.endswith(".json"):
-        raise ValueError("trait must have .json extension")
-    path = trait_path(name)
-    text = path.read_text()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"{name} is not valid json ({e}); the file on disk is "
-                         f"corrupt, read it with persona_trait_read and rewrite "
-                         f"it with persona_trait_write")
-
-def save_json_trait(name, data):
-    """save a .json trait."""
-    path = trait_path(name)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-
-# --- MongoDB-style filter evaluator ---
-
-def _match_condition(value, condition):
-    """evaluate a single field condition against a value."""
-    if not isinstance(condition, dict):
-        # bare value = exact match
-        return value == condition
-    for op, operand in condition.items():
-        if op == "$eq":
-            if value != operand:
-                return False
-        elif op == "$in":
-            if value not in operand:
-                return False
-        elif op in ("$ne", "$not"):
-            if value == operand:
-                return False
-        elif op == "$nin":
-            if value in operand:
-                return False
-        elif op == "$lt":
-            if value is None or value >= operand:
-                return False
-        elif op == "$lte":
-            if value is None or value > operand:
-                return False
-        elif op == "$gt":
-            if value is None or value <= operand:
-                return False
-        elif op == "$gte":
-            if value is None or value < operand:
-                return False
-        elif op == "$regex":
-            flags = 0
-            opts = condition.get("$options", "")
-            if "i" in opts:
-                flags |= re.IGNORECASE
-            if value is None or not re.search(operand, str(value), flags):
-                return False
-        elif op == "$exists":
-            if operand and value is None:
-                return False
-            if not operand and value is not None:
-                return False
-        elif op == "$options":
-            pass  # handled by $regex
-        else:
-            return False
-    return True
-
-def _match_filter(entry_id, entry, filter_obj):
-    """evaluate a MongoDB-style filter against a dict-of-dicts entry."""
-    if not isinstance(filter_obj, dict):
-        return True
-    for key, condition in filter_obj.items():
-        if key == "$or":
-            if not any(_match_filter(entry_id, entry, clause) for clause in condition):
-                return False
-        elif key == "id":
-            if not _match_condition(entry_id, condition):
-                return False
-        else:
-            if not _match_condition(entry.get(key), condition):
-                return False
-    return True
-
-def _resolve_dot_path(obj, path):
-    """resolve a dot-separated path into a nested dict (e.g. 'meta.source')."""
-    for part in path.split("."):
-        if isinstance(obj, dict):
-            obj = obj.get(part)
-        else:
-            return None
-    return obj
+# --- shared helpers the task tools still need ---
 
 def _coerce_json(value, expected_type):
-    """parse string-encoded JSON when the LLM sends a string instead of an object/array.
-    fixes mangled quote tokens (<|"|>), unquoted keys, and bracket mismatches."""
+    """parse string-encoded JSON when the model sends a string instead of an object.
+
+    KEPT THOUGH THE STORAGE TOOLS WENT: models stringify their objects, and answering "fields must
+    be an object" to a well-formed object-in-a-string spends a turn on punctuation.
+    """
     if isinstance(value, str):
         cleaned = re.sub(r'<\|"\|>', '"', value)
-        for attempt in [cleaned, _fix_json_structure(cleaned)]:
-            try:
-                parsed = json.loads(attempt)
-                if isinstance(parsed, expected_type):
-                    return parsed
-            except (json.JSONDecodeError, ValueError):
-                continue
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, expected_type):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
     return value
 
-def _fix_json_structure(s):
-    """attempt to fix common JSON malformations: unquoted keys, ] instead of }."""
-    # quote unquoted keys (word chars or $ prefix before colon)
-    s = re.sub(r'(?<=[{,])\s*(\$?\w+)\s*:', r' "\1":', s)
-    # fix ] used as } by matching open/close bracket balance
-    result, stack = [], []
-    for ch in s:
-        if ch in '{[':
-            stack.append(ch)
-            result.append(ch)
-        elif ch == '}':
-            stack.pop() if stack else None
-            result.append('}')
-        elif ch == ']':
-            if stack and stack[-1] == '{':
-                stack.pop()
-                result.append('}')
-            else:
-                if stack:
-                    stack.pop()
-                result.append(']')
-        else:
-            result.append(ch)
-    return ''.join(result)
-
-def _validate_fields(fields):
-    """return fields if valid (None or list of strings), else raise."""
-    if fields is None:
-        return None
-    fields = _coerce_json(fields, list)
-    if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
-        raise ValueError(f'fields must be ["name1", "name2"], got: {json.dumps(fields)[:100]}')
-    return fields
-
-def _match_record_filter(record, filter_obj):
-    """evaluate a MongoDB-style filter against a record (JSONL). supports dot-path keys for nested fields."""
-    if not isinstance(filter_obj, dict):
-        return True
-    for key, condition in filter_obj.items():
-        if key == "$or":
-            if not any(_match_record_filter(record, clause) for clause in condition):
-                return False
-        else:
-            value = _resolve_dot_path(record, key) if "." in key else record.get(key)
-            if not _match_condition(value, condition):
-                return False
-    return True
-
-# --- data tools (.json) ---
-
-@tool(permission={"arg": "trait"})
-def data_query(
-    trait: Annotated[str, TRAIT_JSON_DESC],
-    key: Annotated[str, param(KEY_DESC, optional=True)] = "",
-    filter: Annotated[object, param(FILTER_JSON_DESC, type="object", optional=True)] = None,
-    fields: Annotated[object, param(FIELDS_JSON_DESC, type="array[string]", optional=True)] = None,
-    limit: Annotated[str, param("max entries to return (default 50, applied after filter)", optional=True)] = "50",
-    offset: Annotated[str, param("skip first N entries (default 0)", optional=True)] = "0",
-) -> HookResult:
-    """query structured data from a .json trait. omit key to return the whole document. on dict-of-dicts, supports MongoDB-style filter on values with id matching on keys. values are returned JSON-encoded"""
-    try:
-        filter = _coerce_json(filter, dict)
-        if filter is not None and not isinstance(filter, dict):
-            raise ValueError(f'filter must be a JSON object like {{"status": "open"}}, got string: {str(filter)[:80]}')
-        fields = _validate_fields(fields)
-        data = load_json_trait(trait)
-        selected = get_at_key(data, key) if valid_key(key) else data
-        # dict-of-dicts: apply filter, pagination, fields projection
-        if isinstance(selected, dict) and filter is not None or (
-            isinstance(selected, dict) and (fields is not None or int(limit) < len(selected) or int(offset) != 0)
-            and all(isinstance(v, dict) for v in selected.values())
-        ):
-            filtered = {k: v for k, v in selected.items() if _match_filter(k, v, filter)}
-            items = list(filtered.items())
-            start = int(offset)
-            end = start + int(limit)
-            if start < 0 and end >= 0:
-                end = None
-            page = dict(items[start:end])
-            if fields is not None and isinstance(fields, list) and fields:
-                page = {k: {f: v[f] for f in fields if f in v} for k, v in page.items()}
-            return {"result": json.dumps(page, indent=2, ensure_ascii=False)}
-        # non-dict or no filter/pagination: return as-is
-        if isinstance(selected, dict) and filter is not None:
-            filtered = {k: v for k, v in selected.items() if _match_filter(k, v, filter)}
-            return {"result": json.dumps(filtered, indent=2, ensure_ascii=False)}
-        return {"result": json.dumps(selected, indent=2, ensure_ascii=False)}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": result_err(str(e))}
-    except re.error as e:
-        return {"result": result_err(f"invalid regex: {e}")}
-
-@tool(permission={"arg": "trait"})
-def data_update(
-    trait: Annotated[str, TRAIT_JSON_DESC],
-    ops: Annotated[object, param(OPS_DESC, type="object")] = None,
-) -> HookResult:
-    """modify a .json trait using MongoDB-style update operators ($set, $push, $unset). auto-creates the trait on first write. paths are dot-separated; use "." to address the whole document"""
-    try:
-        ops = _coerce_json(ops, dict)
-        if not isinstance(ops, dict) or not ops:
-            return {"result": result_err('ops must be a non-empty object like {"$set": {"color": "blue"}}')}
-        for op, fields in ops.items():
-            if op not in ("$set", "$push", "$unset"):
-                return {"result": result_err(f"unknown operator: {op} (supported: $set, $push, $unset)")}
-            if not isinstance(fields, dict):
-                return {"result": result_err(f"{op} expects an object of path->value, got {type(fields).__name__}")}
-        try:
-            data = load_json_trait(trait)
-        except FileNotFoundError:
-            data = {}
-        modified_paths = []
-        for op, fields in ops.items():
-            for path, val in fields.items():
-                if not valid_key(path):
-                    return {"result": result_err(f"{op}: path must be a field name (e.g. \"color\", \"nested.size\"); the whole document cannot be addressed - use persona_trait_write to replace or persona_trait_delete to remove the file")}
-                if op == "$set":
-                    data, ok = deep_set(data, path, val)
-                    if not ok:
-                        return {"result": result_err(f"$set: path not reachable: {path}")}
-                elif op == "$unset":
-                    data, ok = delete_at_key(data, path)
-                    if not ok:
-                        return {"result": result_err(f"$unset: path not found: {path}")}
-                elif op == "$push":
-                    if isinstance(val, dict) and "$each" in val:
-                        items = val["$each"]
-                        if not isinstance(items, list):
-                            return {"result": result_err(f"$push {path}: $each expects an array")}
-                    else:
-                        items = [val]
-                    data, ok = deep_push(data, path, items)
-                    if not ok:
-                        return {"result": result_err(f"$push: target is not an array: {path}")}
-                modified_paths.append(path)
-        save_json_trait(trait, data)
-        return {"result": result_ok({"modified_paths": modified_paths}), "modified": [trait],
-                "notify": [{"type": "trait_changed", "files": [trait]}]}
-    except ValueError as e:
-        return {"result": result_err(str(e))}
-
-@tool(permission={"arg": "trait"})
-def data_count(
-    trait: Annotated[str, TRAIT_JSON_DESC],
-    field: Annotated[str, param("group by this field and count occurrences of each unique value (e.g. field='status' -> {\"open\": 5, \"done\": 3})", optional=True)] = "",
-    filter: Annotated[object, param(FILTER_JSON_DESC, type="object", optional=True)] = None,
-) -> HookResult:
-    """count entries in a dict-of-dicts .json trait. without field: returns total count and field names. with field: groups by that field and returns count per unique value"""
-    try:
-        filter = _coerce_json(filter, dict)
-        data = load_json_trait(trait)
-        if not isinstance(data, dict):
-            return {"result": result_err(f"{trait} is not a dict-of-dicts")}
-        entries = {k: v for k, v in data.items() if _match_filter(k, v, filter)}
-        if field:
-            values: dict[str, int] = {}
-            for v in entries.values():
-                if isinstance(v, dict):
-                    fv = v.get(field)
-                    if fv is not None:
-                        key = str(fv)
-                        values[key] = values.get(key, 0) + 1
-            return {"result": json.dumps({"count": len(entries), "field": field, "values": values})}
-        field_counts: dict[str, int] = {}
-        for v in entries.values():
-            if isinstance(v, dict):
-                for k in v:
-                    field_counts[k] = field_counts.get(k, 0) + 1
-        return {"result": json.dumps({"count": len(entries), "fields": field_counts})}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": result_err(str(e))}
-
-# --- generic record tools (.jsonl traits) ---
-
-def load_records(name):
-    """load all records from a .jsonl trait, enforcing extension."""
-    if not name.endswith(".jsonl"):
-        raise ValueError("trait must have .jsonl extension")
-    path = trait_path(name)
-    lines = path.read_text().strip().splitlines()
-    records = []
-    for i, line in enumerate(lines, 1):
-        if not line.strip():
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"{name} has an invalid json line at line {i} ({e}); "
-                             f"read it with persona_trait_read and fix it with "
-                             f"persona_trait_write")
-    return records
-
-def append_to_trait(name, text):
-    """append raw text to a trait file, creating parent dirs as needed."""
-    path = trait_path(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
-        f.write(text)
-
-def append_record(name, record):
-    """append a single JSON record to a .jsonl trait."""
-    append_to_trait(name, json.dumps(record, ensure_ascii=False) + "\n")
-
 def _normalize_field_value(v):
-    """unwrap common LLM-introduced wrappers like {"$literal": x}, {"$value": x},
-    or single-key dicts wrapping a primitive (e.g. {"observation": "observation"})."""
-    if isinstance(v, dict) and len(v) == 1:
-        only_key = next(iter(v))
-        only_val = v[only_key]
-        if only_key in ("$literal", "$value", "$const"):
-            return only_val
-        if isinstance(only_val, (str, int, float, bool)):
-            return only_val
+    """a scalar the model may have wrapped, unwrapped once."""
+    if isinstance(v, dict) and len(v) == 1 and "value" in v:
+        return v["value"]
     return v
 
 def _normalize_fields(fields):
-    """normalize common LLM nesting mistakes for record_append fields."""
-    if not isinstance(fields, dict):
-        return fields
-    # case: single key whose value is a dict - use inner dict (sibling nesting)
-    if len(fields) == 1:
-        only_value = next(iter(fields.values()))
-        if isinstance(only_value, dict) and only_value:
-            fields = only_value
     return {k: _normalize_field_value(v) for k, v in fields.items()}
 
-def _stable_sort_record(record):
-    """sort record keys alphabetically, id first."""
-    keys = sorted(record.keys())
-    if "id" in record:
-        keys = ["id"] + [k for k in keys if k != "id"]
-    return {k: record[k] for k in keys}
-
-@tool(permission={"arg": "trait"})
-def record_append(
-    trait: Annotated[str, TRAIT_JSONL_DESC],
-    fields: Annotated[object, param('flat object mapping field names directly to values. example: {"type": "observation", "content": "saw a bird"}. each key is a field name, each value is the literal value to store (string, number, boolean, array, or object). do NOT wrap values in extra objects - pass them directly', type="object")] = None,
-) -> HookResult:
-    """append one new record to a .jsonl trait. each call adds a new entry with an automatic UTC timestamp; calling twice creates two records"""
-    try:
-        if not trait.endswith(".jsonl"):
-            return {"result": result_err("trait must have .jsonl extension")}
-        trait_path(trait)  # validate path
-        if not isinstance(fields, dict) or not any(v for v in fields.values()):
-            return {"result": result_err("fields must be a JSON object with at least one non-empty value")}
-        fields = _normalize_fields(fields)
-        timestamp = format_iso(datetime.now(timezone.utc))
-        record = {"timestamp": timestamp}
-        record.update(fields)
-        append_record(trait, record)
-        return {"result": result_ok({"timestamp": timestamp}), "modified": [trait],
-                "notify": [{"type": "trait_changed", "files": [trait]}]}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": result_err(str(e))}
-
-@tool(permission={"arg": "trait"})
-def record_query(
-    trait: Annotated[str, TRAIT_JSONL_DESC],
-    filter: Annotated[object, param(FILTER_JSONL_DESC, type="object", optional=True)] = None,
-    fields: Annotated[object, param(FIELDS_JSONL_DESC, type="array[string]", optional=True)] = None,
-    limit: Annotated[str, param("max records to return (default 50)", optional=True)] = "50",
-    offset: Annotated[str, param("skip first N records, negative counts from end (default 0, oldest first)", optional=True)] = "0",
-) -> HookResult:
-    """query records from a .jsonl trait with MongoDB-style filtering and pagination"""
-    try:
-        filter = _coerce_json(filter, dict)
-        if filter is not None and not isinstance(filter, dict):
-            raise ValueError(f'filter must be a JSON object like {{"status": "open"}}, got string: {str(filter)[:80]}')
-        fields = _validate_fields(fields)
-        records = load_records(trait)
-        filtered = [r for r in records if _match_record_filter(r, filter)]
-        start = int(offset)
-        end = start + int(limit)
-        if start < 0 and end >= 0:
-            end = None
-        page = filtered[start:end]
-        if fields is not None and isinstance(fields, list) and fields:
-            page = [{f: r[f] for f in fields if f in r} for r in page]
-        else:
-            page = [_stable_sort_record(r) for r in page]
-        return {"result": f"{len(page)}/{len(filtered)} records:\n" +
-                "\n".join(json.dumps(r, ensure_ascii=False) for r in page)}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": result_err(str(e))}
-    except re.error as e:
-        return {"result": result_err(f"invalid regex: {e}")}
-
-@tool(permission={"arg": "trait"})
-def record_count(
-    trait: Annotated[str, TRAIT_JSONL_DESC],
-    field: Annotated[str, param("group by this field (supports dot-paths like meta.source) and count occurrences of each unique value (e.g. field='status' -> {\"open\": 5, \"done\": 3})", optional=True)] = "",
-    filter: Annotated[object, param(FILTER_JSONL_DESC, type="object", optional=True)] = None,
-) -> HookResult:
-    """count records in a .jsonl trait. without field: returns total count ("count") and a summary of which field names exist ("fields" - not a filter, just metadata). with field: groups by that field's values and returns count per unique value"""
-    try:
-        filter = _coerce_json(filter, dict)
-        records = load_records(trait)
-        filtered = [r for r in records if _match_record_filter(r, filter)]
-        if field:
-            values: dict[str, int] = {}
-            for r in filtered:
-                v = _resolve_dot_path(r, field) if "." in field else r.get(field)
-                if v is not None:
-                    key = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True)
-                    values[key] = values.get(key, 0) + 1
-            return {"result": json.dumps({"count": len(filtered), "field": field, "values": values})}
-        field_counts: dict[str, int] = {}
-        for r in filtered:
-            for k in r:
-                field_counts[k] = field_counts.get(k, 0) + 1
-        return {"result": json.dumps({"count": len(filtered), "fields": field_counts})}
-    except (ValueError, FileNotFoundError) as e:
-        return {"result": result_err(str(e))}
-
-# --- task tools (fixed trait: .tasks.json) ---
-
-# canonical format: UTC with +00:00 offset, millisecond precision
-# (e.g. 2026-04-01T09:00:00.000+00:00)
 def format_iso(dt):
     utc = dt.astimezone(timezone.utc)
     return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}+00:00"
+
+def now_iso():
+    return format_iso(datetime.now(timezone.utc))
 
 def validate_iso_datetime(value):
     """validate and parse an ISO 8601 datetime with timezone. raises ValueError if invalid."""
@@ -831,11 +242,6 @@ def validate_iso_datetime(value):
     if dt.tzinfo is None:
         raise ValueError(f"missing timezone: {value}")
     return dt
-
-@tool(name="datetime")
-def _datetime() -> HookResult:
-    """the current date and time in canonical ISO 8601 UTC (e.g. 2026-04-01T09:00:00.000+00:00); use it to set task due dates, timestamp records, or reason about "now\""""
-    return {"result": format_iso(datetime.now(timezone.utc))}
 
 # parse ISO 8601 duration (P[nY][nM][nW][nD][T[nH][nM][nS]])
 ISO_DURATION_RE = re.compile(
@@ -853,14 +259,22 @@ def parse_iso_duration(value):
     total_days = years * 365 + months * 30 + weeks * 7 + days
     return timedelta(days=total_days, hours=hours, minutes=minutes, seconds=seconds)
 
-def load_tasks():
-    try:
-        return load_json_trait(TASKS_TRAIT)
-    except FileNotFoundError:
-        return {}
+@tool(name="datetime")
+def _datetime() -> HookResult:
+    """the current date and time in canonical ISO 8601 UTC (e.g. 2026-04-01T09:00:00.000+00:00); use it to set task due dates, timestamp records, or reason about "now\""""
+    return {"result": now_iso()}
 
-def save_tasks(data):
-    save_json_trait(TASKS_TRAIT, data)
+# --- tasks: persona's schema over memory's shapes ---
+#
+# THE LAYERING IS THE POINT. memory provides addressability (`$set` on one key of a document, an
+# append to a log); persona provides MEANING -- what `due` is, which statuses exist, and that a
+# comment on a recurring task moves its due date. memory must not know any of that, which is why
+# the ISO duration arithmetic stayed here when everything around it left.
+
+def _task(task_id):
+    """one task, or None. a dot-path read, so finding one does not fetch all the others."""
+    got = _mem("GET", TASKS_TRAIT, key=task_id)
+    return got if isinstance(got, dict) and got else None
 
 @tool
 def task_create(
@@ -873,9 +287,6 @@ def task_create(
 ) -> HookResult:
     """create a new task. set interval for recurring tasks. use persona_task_comment to log updates on recurring tasks"""
     try:
-        tasks = load_tasks()
-        if not isinstance(tasks, dict):
-            return {"result": result_err(f"{TASKS_TRAIT} is not an object")}
         if due:
             validate_iso_datetime(due)
         if interval:
@@ -883,8 +294,9 @@ def task_create(
             if not due:
                 return {"result": result_err("interval requires a due date")}
         task_id = str(uuid.uuid4())
-        now = format_iso(datetime.now(timezone.utc))
+        now = now_iso()
         task = {"title": title, "status": status, "created": now, "updated": now}
+        fields = _coerce_json(fields, dict)
         if isinstance(fields, dict):
             task.update(_normalize_fields(fields))
         if description:
@@ -893,11 +305,11 @@ def task_create(
             task["due"] = due
         if interval:
             task["interval"] = interval
-        tasks[task_id] = task
-        save_tasks(tasks)
-        return {"result": result_ok({"id": task_id}), "modified": [TASKS_TRAIT],
-                "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT]}]}
-    except (ValueError, FileNotFoundError) as e:
+        # ONE `$set` ON THE TASK'S OWN KEY, so creating a task neither reads nor rewrites the
+        # others -- and two creations racing cannot lose one another.
+        _mem("PATCH", TASKS_TRAIT, {"$set": {task_id: task}})
+        return {"result": result_ok({"id": task_id})}
+    except (ValueError, MemoryError) as e:
         return {"result": result_err(str(e))}
 
 @tool(permission={"arg": "id"})
@@ -912,30 +324,34 @@ def task_update(
 ) -> HookResult:
     """update task metadata (title, description, fields). for recurring tasks, use persona_task_comment to log progress - it auto-bumps due by interval"""
     try:
-        tasks = load_tasks()
-        if id not in tasks:
+        task = _task(id)
+        if not task:
             return {"result": result_err(f"not found: {id}")}
+        # SET ONLY WHAT CHANGED, by dot-path. writing the whole task back would put every field it
+        # read back with it, so two edits in flight would each undo the other's.
+        ops = {}
+        fields = _coerce_json(fields, dict)
         if isinstance(fields, dict):
-            tasks[id].update(_normalize_fields(fields))
+            for k, v in _normalize_fields(fields).items():
+                ops[f"{id}.{k}"] = v
         if due:
             validate_iso_datetime(due)
-            tasks[id]["due"] = due
+            ops[f"{id}.due"] = due
         if interval:
             parse_iso_duration(interval)
-            if not tasks[id].get("due") and not due:
+            if not task.get("due") and not due:
                 return {"result": result_err("interval requires a due date")}
-            tasks[id]["interval"] = interval
+            ops[f"{id}.interval"] = interval
         if title:
-            tasks[id]["title"] = title
+            ops[f"{id}.title"] = title
         if description:
-            tasks[id]["description"] = description
+            ops[f"{id}.description"] = description
         if status:
-            tasks[id]["status"] = status
-        tasks[id]["updated"] = format_iso(datetime.now(timezone.utc))
-        save_tasks(tasks)
-        return {"result": result_ok(), "modified": [TASKS_TRAIT],
-                "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT]}]}
-    except (ValueError, FileNotFoundError) as e:
+            ops[f"{id}.status"] = status
+        ops[f"{id}.updated"] = now_iso()
+        _mem("PATCH", TASKS_TRAIT, {"$set": ops})
+        return {"result": result_ok()}
+    except (ValueError, MemoryError) as e:
         return {"result": result_err(str(e))}
 
 @tool(permission={"arg": "id"})
@@ -947,24 +363,24 @@ def task_comment(
     try:
         if not text:
             return {"result": result_err("text is required")}
-        tasks = load_tasks()
-        if id not in tasks:
+        task = _task(id)
+        if not task:
             return {"result": result_err(f"not found: {id}")}
-        now = format_iso(datetime.now(timezone.utc))
-        record = {"timestamp": now, "task_id": id, "text": text}
-        append_record(TASK_COMMENTS_TRAIT, record)
-        tasks[id]["updated"] = now
-        # recurring: bump due on comment
+        # THE ORDER IS LOAD-BEARING AND THERE IS NO TRANSACTION ACROSS TWO FILES. append the
+        # comment FIRST: a crash between the two then leaves a comment against a stale due date,
+        # which is visible and self-correcting. the other order leaves a bumped task with no record
+        # of why, which is invisible.
+        _mem("POST", TASK_COMMENTS_TRAIT, {"fields": {"task_id": id, "text": text}})
+        ops = {f"{id}.updated": now_iso()}
         extra = {}
-        if tasks[id].get("interval") and tasks[id].get("due"):
-            old_due = validate_iso_datetime(tasks[id]["due"])
-            delta = parse_iso_duration(tasks[id]["interval"])
-            tasks[id]["due"] = format_iso(old_due + delta)
-            extra["due"] = tasks[id]["due"]
-        save_tasks(tasks)
-        return {"result": result_ok(extra), "modified": [TASKS_TRAIT, TASK_COMMENTS_TRAIT],
-                "notify": [{"type": "trait_changed", "files": [TASKS_TRAIT, TASK_COMMENTS_TRAIT]}]}
-    except (ValueError, FileNotFoundError) as e:
+        if task.get("interval") and task.get("due"):
+            old_due = validate_iso_datetime(task["due"])
+            delta = parse_iso_duration(task["interval"])
+            extra["due"] = format_iso(old_due + delta)
+            ops[f"{id}.due"] = extra["due"]
+        _mem("PATCH", TASKS_TRAIT, {"$set": ops})
+        return {"result": result_ok(extra)}
+    except (ValueError, MemoryError) as e:
         return {"result": result_err(str(e))}
 
 # --- prompt tools (the hook owns its prompts, v3) ---
@@ -972,7 +388,10 @@ def task_comment(
 @tool
 def prompt_list() -> HookResult:
     """list the persona's prompt files (the prompt contract driving each lifecycle stage)"""
-    names = sorted(f.name for f in PROMPTS.glob("*.md")) if PROMPTS.is_dir() else []
+    try:
+        names = sorted(_named(_index(), PROMPTS))
+    except MemoryError as e:
+        return {"result": result_err(str(e))}
     return {"result": f"prompts: {', '.join(names)}" if names else "no prompts"}
 
 @tool(permission={"arg": "prompt"})
@@ -981,10 +400,9 @@ def prompt_read(
 ) -> HookResult:
     """read a prompt file. these drive the system prompt (preamble/chat), heartbeat, and recover"""
     try:
-        return {"result": prompt_path(prompt).read_text()}
-    except FileNotFoundError:
-        return {"result": f"not found: {prompt}"}
-    except ValueError as e:
+        got = _mem("GET", f"{PROMPTS}/{prompt}")
+        return {"result": got if isinstance(got, str) else json.dumps(got)}
+    except MemoryError as e:
         return {"result": str(e)}
 
 @tool(permission={"arg": "prompt"})
@@ -994,12 +412,10 @@ def prompt_write(
 ) -> HookResult:
     """create or overwrite a prompt file. affects the next mutate_request/heartbeat/recover"""
     try:
-        p = prompt_path(prompt)
-    except ValueError as e:
+        _mem("PUT", f"{PROMPTS}/{prompt}", content)
+    except MemoryError as e:
         return {"result": result_err(str(e))}
-    PROMPTS.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
-    return {"result": f"wrote {prompt}", "modified": [f"prompts/{prompt}"]}
+    return {"result": f"wrote {prompt}"}
 
 # generate tool definitions from @tool-decorated functions via Annotated metadata
 def tool_defs():
@@ -1032,15 +448,20 @@ def mutate_request(ctx: dict) -> HookResult:
     # v2 host-capability surfacing: log host/model/user when present.
     host = ctx.get("host") or {}
     if host:
-        debug(f"host={host.get('name', '?')} v={host.get('version', '?')}")
+        debug(f"host={host.get('name', '?')} v={host.get('version', '?')} memory={MEMORY or '(none)'}")
     if "model" in ctx:
         debug(f"model={ctx.get('model') or '(none)'}")
     if "user" in ctx:
         debug(f"user_len={len(ctx.get('user') or '')}")
     # path-gating (e.g. opencode's title-gen / subagent suppression) is
     # the host's responsibility - see the opencode agent marker.
-    debug(f"core: {', '.join(core_trait_names())}, listed: {', '.join(listed_trait_names())}")
-    return {"system": system_prompt(load_prompts(ctx), "chat"), **REPLACE_SYSTEM}
+    try:
+        return {"system": system_prompt("chat"), **REPLACE_SYSTEM}
+    except MemoryError as e:
+        # A SESSION WITH NO SOUL MUST SAY SO. returning nothing would leave the backend's own
+        # default in place, which reads as persona simply not being loaded.
+        debug(f"mutate_request: {e}")
+        return {"system": [f"system degraded - memory is unreachable ({e})"], **REPLACE_SYSTEM}
 
 @hook
 def format_notification(ctx: dict) -> HookResult:
@@ -1072,22 +493,26 @@ def before_stop(ctx: dict) -> HookResult:
 
 @hook
 def heartbeat(ctx: dict) -> HookResult:
-    debug(f"core: {', '.join(core_trait_names())}, listed: {', '.join(listed_trait_names())}")
-    prompts = load_prompts(ctx)
-    user = (prompts.get("heartbeat") or "").strip()
+    user = prompt_text("heartbeat").strip()
     if not user:
         debug("no heartbeat prompt, skipping")
         return {}
-    return {"system": system_prompt(prompts, "heartbeat"), "user": user, **REPLACE_SYSTEM}
+    try:
+        return {"system": system_prompt("heartbeat"), "user": user, **REPLACE_SYSTEM}
+    except MemoryError as e:
+        debug(f"heartbeat: {e}")
+        return {}
 
 @hook
 def recover(ctx: dict) -> HookResult:
     debug(f"recovering from {ctx.get('failed_hook', '?')}: {ctx.get('error', '?')}")
-    prompts = load_prompts(ctx)
-    user = prompts.get("recover", "")
+    user = prompt_text("recover")
     if not user:
         return {"system": ["system recovery - prompts unavailable"], **REPLACE_SYSTEM}
-    return {"system": system_prompt(prompts, "recover"), "user": user, **REPLACE_SYSTEM}
+    try:
+        return {"system": system_prompt("recover"), "user": user, **REPLACE_SYSTEM}
+    except MemoryError:
+        return {"system": ["system recovery - prompts unavailable"], **REPLACE_SYSTEM}
 
 @hook
 def before_tool(ctx: dict) -> HookResult:
@@ -1099,10 +524,9 @@ def after_tool(ctx: dict) -> HookResult:
 
 @hook
 def compacting(ctx: dict) -> HookResult:
-    debug(f"core: {', '.join(core_trait_names())}, listed: {', '.join(listed_trait_names())}")
     # persona owns compaction: hand back its compaction.md as the summarization prompt. an
     # empty prompt (no compaction.md) falls back to the backend's own compaction.
-    instructions = (load_prompts(ctx).get("compaction") or "").strip()
+    instructions = prompt_text("compaction").strip()
     return {"prompt": instructions} if instructions else {}
 
 # dispatch to @tool-registered handler by name
@@ -1135,6 +559,9 @@ if __name__ == "__main__":
         ctx = json.loads(sys.stdin.read() or "{}")
     except json.JSONDecodeError:
         ctx = {}
+    # THE ENDPOINT IS LEARNED HERE, ONCE, before any handler runs -- `execute_tool` calls handlers
+    # with the model's arguments only, so a tool has no ctx of its own to read it from.
+    MEMORY = (ctx.get("host") or {}).get("memory") or MEMORY
     try:
         result = h(ctx)
     except Exception as e:

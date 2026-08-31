@@ -21,7 +21,8 @@ composition + tools + heartbeat), `bridge` (matrix), `permission` (the tool-call
 - the `hcp` face connects to the hub as a CLIENT, runs `discover` on the hook script, and
   arms hmux's system-prompt hook -- it composes the prompt from persona's SOUL + traits +
   prompts (the hook's `mutate_request` stage) and registers the hook's tools (19: the
-  trait_/task_/data_/prompt_ families) plus the `hcp_*` face builtins (heartbeat status/set,
+  task_/prompt_ families -- the storage tools moved to the `memory` face in hmux phase 74) plus
+  the `hcp_*` face builtins (heartbeat status/set,
   hook read/write). a core-trait edit carries permission metadata (`@tool(permission=...)`) that the
   `permission` face can gate (the initial autonomy-safe policy does not yet; see the follow-up on
   arg-keyed core-trait gating).
@@ -186,7 +187,8 @@ host now. hmux is the one front door via `docker compose`.
 1. (base image present) `make build && make up`; `make logs` shows hub + pi backend + faces
    up and the `hcp face: arming` line (persona hooks loaded).
 2. admin: `make admin` (http://localhost:4280/admin) -> chat with Per; SOUL/traits in context,
-   trait_*/task_* tools work, a core-trait edit prompts permission in the admin.
+   memory_*/task_* tools work, and a core-trait edit (`traits/SOUL.md`) prompts permission in the
+   admin -- note the rule is keyed on the PATH now, not the bare filename.
 3. tui: `make tui` (opencode attach http://localhost:4096) -> same session visible (R7).
 4. omni: http://localhost:4284 -> voice round-trip (with HMUX_VOICE_URL set).
 5. eval: `make eval` -> suite green (a native hub client on :4280/ws drives session

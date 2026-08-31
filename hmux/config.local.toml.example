@@ -5,8 +5,8 @@
 # TABLES MERGE, SCALARS AND LISTS REPLACE, and a face is matched BY KIND -- so you add one rule
 # without restating the policy, and you do not have to know where the face sits in the list.
 #
-# A FACE IS WRITTEN THE WAY hmux/config.toml WRITES ONE: `[[profile.persona.faces]]` with a `kind`
-# line, then its sub-table. `[profile.persona.faces.<kind>]` on its own LOOKS right -- it is how an
+# A SPOKE IS WRITTEN THE WAY hmux/config.toml WRITES ONE: `[[profile.persona.spokes]]` with a `kind`
+# line, then its sub-table. `[profile.persona.spokes.<kind>]` on its own LOOKS right -- it is how an
 # HMUX_CFG_ path addresses a face -- and is a different shape in a file. it is refused by name.
 #
 # this is the layer for anything the environment cannot spell. `HMUX_CFG_*` carries one value at one
@@ -14,22 +14,22 @@
 
 # allow a whole family of tools:
 #
-#[[profile.persona.faces]]
+#[[profile.persona.spokes]]
 #kind = "permission"
-#[profile.persona.faces.permission.tools]
+#[profile.persona.spokes.permission.tools]
 #"htru_*" = "allow"
 
 # require a compared short auth string before a peer may ask anything. hmux defaults to "sas" and
 # hmux/config.toml relaxes it to "tofu"; this puts it back, and an unverified peer's turns are then
 # refused until `federation_verify` has been run on both ends:
 #
-#[[profile.persona.faces]]
+#[[profile.persona.spokes]]
 #kind = "federation"
-#[profile.persona.faces.federation]
+#[profile.persona.spokes.federation]
 #verify = "sas"
 
 # add a face this deployment wants and the checked-in config does not run:
 #
-#[[profile.persona.faces]]
+#[[profile.persona.spokes]]
 #kind = "canvas"
 #port = 4294

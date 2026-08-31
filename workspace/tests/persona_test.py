@@ -1,34 +1,153 @@
 #!/usr/bin/env python3
-"""end-to-end tests for persona hook dispatcher (JSONL IPC)."""
+"""end-to-end tests for the persona hook dispatcher (JSONL IPC over a memory endpoint).
 
-import json, os, re, shutil, subprocess, sys, tempfile
+WHAT THIS FILE STOPPED TESTING (hmux phase 74). it was 94KB, and most of it covered a storage
+engine persona no longer has: trait/document/record tools, a mongo filter evaluator, a dot-path
+updater. all of that moved into `hmux-memory`, where it is covered by 61 rust tests -- cheaper, and
+exhaustive in a way a subprocess-per-case suite could never be.
 
+WHAT IS LEFT IS WHAT PERSONA ACTUALLY DECIDES, and it is worth testing precisely because it is
+small: how a system prompt is composed from files, what a task is, and the ORDER of the two writes
+a comment makes. the store is a fake here ON PURPOSE -- this suite asserts persona's policy, and
+the endpoint's own contract is hmux's to keep (`e2e/memory_face_test.py`, `crates/hmux-memory`).
+
+the hook is driven the way the host drives it: argv names the stage, one json object on stdin,
+JSONL on stdout.
+"""
+
+import json
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+HOOK = Path(__file__).resolve().parents[1] / "hooks" / "persona.py"
 PASS = FAIL = 0
 
-PROMPT_CONTRACT = {
-    "preamble": "preamble.md", "chat": "chat.md", "heartbeat": "heartbeat.md",
-    "compaction": "compaction.md", "recover": "recover.md",
-}
 
-def load_prompts(workspace):
-    """mirror the host's prompt loading (loadPrompts) for hook tests."""
-    out = {}
-    for name, file in PROMPT_CONTRACT.items():
-        p = os.path.join(workspace, "prompts", file)
-        if os.path.exists(p):
-            out[name] = open(p).read()
-    return out
+def check(desc, ok, detail=""):
+    global PASS, FAIL
+    if ok:
+        PASS += 1
+        print(f"PASS: {desc}")
+    else:
+        FAIL += 1
+        print(f"FAIL: {desc}")
+        if detail:
+            print(f"  {detail}")
 
-def call_hook(hook_path, name, ctx=None):
-    """call a hook and return (merged_result, logs, exit_code).
-    auto-injects ctx.prompts from workspace/prompts/ to mirror the host."""
+
+class FakeMemory:
+    """the subset of the memory endpoint persona uses, plus a record of what it was asked.
+
+    DELIBERATELY NOT A REIMPLEMENTATION of the store: it holds what it is told and hands it back.
+    what it is really for is the REQUEST LOG -- the order and the shape of what persona sends,
+    which is the half no rust test can see.
+    """
+
+    def __init__(self, entries=None, docs=None):
+        self.entries = entries or []          # [{path, visibility, content}]
+        self.docs = docs or {}                # path -> {key: value}
+        self.log = []                         # [(method, path, body-or-query)]
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):        # keep the test output readable
+                pass
+
+            def _body(self):
+                n = int(self.headers.get("content-length") or 0)
+                raw = self.rfile.read(n) if n else b""
+                try:
+                    return json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    return raw.decode()
+
+            def _send(self, obj, status=200):
+                payload = obj.encode() if isinstance(obj, str) else json.dumps(obj).encode()
+                self.send_response(status)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                u = urlparse(self.path)
+                q = {k: v[0] for k, v in parse_qs(u.query).items()}
+                rel = u.path[len("/t"):].lstrip("/")
+                outer.log.append(("GET", rel, q))
+                if not rel:
+                    want = q.get("content")
+                    out = []
+                    for e in outer.entries:
+                        row = {k: v for k, v in e.items() if k != "content"}
+                        if want and e.get("visibility") == want:
+                            row["content"] = e.get("content", "")
+                        out.append(row)
+                    return self._send({"seq": len(outer.log), "entries": out})
+                if rel in outer.docs:
+                    doc = outer.docs[rel]
+                    key = q.get("key")
+                    return self._send(doc.get(key, {}) if key else doc)
+                for e in outer.entries:
+                    if e.get("path") == rel:
+                        return self._send(e.get("content", ""))
+                return self._send({"error": f"`{rel}` does not exist"}, 404)
+
+            def do_PUT(self):
+                rel = urlparse(self.path).path[len("/t"):].lstrip("/")
+                body = self._body()
+                outer.log.append(("PUT", rel, body))
+                found = next((e for e in outer.entries if e.get("path") == rel), None)
+                if found:
+                    found["content"] = body
+                else:
+                    outer.entries.append(
+                        {"path": rel, "visibility": "listed", "content": body, "rev": 1})
+                self._send({"path": rel, "rev": 1})
+
+            def do_PATCH(self):
+                rel = urlparse(self.path).path[len("/t"):].lstrip("/")
+                body = self._body()
+                outer.log.append(("PATCH", rel, body))
+                doc = outer.docs.setdefault(rel, {})
+                for path, value in (body.get("$set") or {}).items():
+                    head, _, tail = path.partition(".")
+                    if tail:
+                        doc.setdefault(head, {})[tail] = value
+                    else:
+                        doc[head] = value
+                self._send({"path": rel, "rev": 1})
+
+            def do_POST(self):
+                rel = urlparse(self.path).path[len("/t"):].lstrip("/")
+                body = self._body()
+                outer.log.append(("POST", rel, body))
+                self._send({"path": rel, "rev": 1, "duplicate": False})
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def calls(self, method=None):
+        return [c for c in self.log if method is None or c[0] == method]
+
+    def close(self):
+        self.server.shutdown()
+
+
+def call_hook(stage, ctx=None, memory=None):
+    """drive one stage the way the host does. returns (merged result, logs)."""
     full = dict(ctx or {})
-    if "prompts" not in full:
-        full["prompts"] = load_prompts(os.path.dirname(os.path.dirname(hook_path)))
-    input_data = json.dumps(full)
+    host = dict(full.get("host") or {"name": "hmux", "version": 3})
+    if memory:
+        host["memory"] = memory
+    full["host"] = host
     proc = subprocess.run(
-        [hook_path, name], input=input_data, capture_output=True, text=True,
-    )
+        [sys.executable, str(HOOK), stage], input=json.dumps(full),
+        capture_output=True, text=True)
     result, logs = {}, []
     for line in proc.stdout.strip().splitlines():
         if not line:
@@ -38,1817 +157,178 @@ def call_hook(hook_path, name, ctx=None):
             logs.append(obj["log"])
         else:
             result.update(obj)
-    return result, logs, proc.returncode
-
-def call_tool(hook_path, name, args=None):
-    """shorthand for calling a tool via execute_tool hook."""
-    return call_hook(hook_path, "execute_tool", {"tool": name, "args": args or {}})
-
-def check(desc, ok, detail=""):
-    global PASS, FAIL
-    if ok:
-        PASS += 1
-    else:
-        FAIL += 1
-        print(f"FAIL: {desc}")
-        if detail:
-            print(f"  {detail}")
-
-def has_key(result, key):
-    return key in result
-
-def has_value(result, key, substring):
-    return key in result and substring in str(result[key])
-
-def result_json(r):
-    """parse the result string as JSON."""
-    return json.loads(r["result"])
-
-# --- setup ---
-
-workspace = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-tmp = tempfile.mkdtemp()
-
-try:
-    # copy hook into temp workspace
-    for d in ("hooks", "traits", "prompts"):
-        os.makedirs(os.path.join(tmp, d))
-    shutil.copy2(os.path.join(workspace, "hooks", "persona.py"), os.path.join(tmp, "hooks", "persona.py"))
-    hook = os.path.join(tmp, "hooks", "persona.py")
-    for name, content in [("preamble.md", "preamble"), ("chat.md", "chat"),
-                          ("heartbeat.md", "heartbeat"), ("recover.md", "recover"),
-                          ("compaction.md", "compaction")]:
-        open(os.path.join(tmp, "prompts", name), "w").write(content)
-
-    # --- error handling ---
-
-    r, _, rc = call_hook(hook, "nonexistent")
-    check("unknown hook returns error", has_key(r, "error"))
-
-    proc = subprocess.run([hook], capture_output=True, text=True)
-    check("no args returns error", proc.returncode != 0 or "error" in proc.stdout)
-
-    # --- discover ---
-
-    r, logs, _ = call_hook(hook, "discover")
-    check("discover returns tools key", has_key(r, "tools"))
-    check("discover has no typo keys", not has_key(r, "tool"))
-    names = [t["name"] for t in r["tools"]]
-    for expected in ("trait_list", "trait_read", "trait_write", "trait_edit",
-                     "trait_append", "trait_delete", "trait_move",
-                     "data_query", "data_update", "data_count",
-                     "record_append", "record_query", "record_count",
-                     "task_create", "task_update", "task_comment",
-                     "prompt_list", "prompt_read", "prompt_write"):
-        check(f"discover includes {expected}", expected in names, f"got: {names}")
-    # removed tools must not appear
-    for removed in ("data_read", "data_list", "data_delete", "data_append",
-                    "record_list", "record_fields",
-                    "task_list", "task_read", "task_delete",
-                    "journal_append", "journal_list", "journal_count"):
-        check(f"discover excludes {removed}", removed not in names, f"got: {names}")
-    check("discover returns exactly 20 tools", len(r["tools"]) == 20, f"got: {len(r['tools'])}")
-    check("discover logs tool names", any("tools:" in l for l in logs))
-
-    # --- discover tool parameter schemas ---
-
-    tools_by_name = {t["name"]: t for t in r["tools"]}
-    expected_counts = {"trait_list": 1, "trait_read": 3, "trait_write": 2, "trait_edit": 4}
-    for name, count in expected_counts.items():
-        actual = len(tools_by_name[name]["parameters"])
-        check(f"{name} has {count} params", actual == count, f"got: {actual}")
-
-    # data_query fields param must be array type
-    dq_fields = tools_by_name["data_query"]["parameters"].get("fields", {})
-    check("data_query fields is array[string] type",
-          isinstance(dq_fields, dict) and dq_fields.get("type") == "array[string]",
-          f"got: {dq_fields}")
-
-    # record_query fields param must be array[string] type
-    rq_fields = tools_by_name["record_query"]["parameters"].get("fields", {})
-    check("record_query fields is array[string] type",
-          isinstance(rq_fields, dict) and rq_fields.get("type") == "array[string]",
-          f"got: {rq_fields}")
-
-    # data tools state the JSON-encoding contract so the LLM does not
-    # over-escape on write or misread the encoded read-back
-    dq_desc = tools_by_name["data_query"]["description"]
-    check("data_query description states JSON-encoded output", "JSON-encoded" in dq_desc,
-          f"got: {dq_desc}")
-    du_ops = tools_by_name["data_update"]["parameters"].get("ops", {})
-    check("data_update ops description requires JSON-encoded values",
-          isinstance(du_ops, dict) and "JSON-encoded" in du_ops.get("description", ""),
-          f"got: {du_ops}")
-
-    # --- mutate_request ---
-
-    r, logs, _ = call_hook(hook, "mutate_request")
-    check("request returns system key", has_key(r, "system"))
-    check("request has no tools key", not has_key(r, "tools"))
-    system_text = "\n".join(r.get("system", []))
-    check("request includes preamble", "preamble" in system_text)
-    check("request includes chat prompt", "chat" in system_text)
-    check("request replaces the backend default (not append)", r.get("system_mode") == "replace")
-    check("request logs core traits", any("core:" in l for l in logs))
-
-    # --- mutate_request returns system regardless of payload ---
-    # path-gating moved to the host (the opencode agent marker),
-    # so the hook unconditionally contributes a system prompt.
-
-    for sys_payload in ([], ["unrelated"], ["some prompt"], None):
-        ctx = {} if sys_payload is None else {"system": sys_payload}
-        r, _, _ = call_hook(hook, "mutate_request", ctx)
-        check(f"mutate_request returns system regardless of payload ({sys_payload!r})",
-              has_key(r, "system"))
-
-    # --- mutate_request without pending_updates ---
-
-    r2, _, _ = call_hook(hook, "mutate_request")
-    check("request without pending has system", has_key(r2, "system"))
-    system_text2 = "\n".join(r2.get("system", []))
-    check("request without pending has no trait-update", "trait-update" not in system_text2)
-
-    # --- mutate_request trait visibility ---
-
-    open(os.path.join(tmp, "traits", "CORE.md"), "w").write("core content")
-    open(os.path.join(tmp, "traits", "notes.md"), "w").write("lowercase content")
-    open(os.path.join(tmp, "traits", ".secret.md"), "w").write("hidden")
-
-    r, _, _ = call_hook(hook, "mutate_request")
-    system_text = "\n".join(r.get("system", []))
-    check("request inlines core trait", "core content" in system_text)
-    check("request does not inline lowercase trait", "lowercase content" not in system_text)
-    # verify inlined trait uses {trait:NAME} format
-    check("inlined core trait uses trait: format", "{trait:CORE.md}" in system_text,
-          f"got: {system_text!r}")
-    # content must appear verbatim after the trait tag
-    tag_idx = system_text.find("{trait:CORE.md}")
-    after_tag = system_text[tag_idx + len("{trait:CORE.md}"):].lstrip("\n")
-    check("inlined core trait content is verbatim", after_tag.startswith("core content"),
-          f"got: {after_tag!r}")
-    # listed (non-core) traits are rendered as bare names in the
-    # additional-traits line - see hooks/persona.py system_prompt(),
-    # changed in a2cc630 for eval reasons. {trait:NAME} format remains
-    # the convention for inlined core traits and trait_list output.
-    check("request lists lowercase trait by bare name",
-          "additional traits (use trait_read to view): notes.md" in system_text,
-          f"got: {system_text!r}")
-    check("request hides dot-prefixed content", "hidden" not in system_text)
-    check("request hides dot-prefixed name", ".secret.md" not in system_text)
-
-    for f in ("CORE.md", "notes.md", ".secret.md"):
-        os.remove(os.path.join(tmp, "traits", f))
-
-    # --- mutate_request core detection with non-alpha chars ---
-
-    open(os.path.join(tmp, "traits", "V2_PLAN.md"), "w").write("v2 plan content")
-    open(os.path.join(tmp, "traits", "MY.TRAIT.txt"), "w").write("my trait content")
-
-    r, _, _ = call_hook(hook, "mutate_request")
-    system_text = "\n".join(r.get("system", []))
-    check("request inlines ALLCAPS with digits+underscore", "v2 plan content" in system_text)
-    check("request inlines ALLCAPS with dots+any ext", "my trait content" in system_text)
-    check("request does not list ALLCAPS digit trait", "V2_PLAN.md" not in system_text.split("additional traits")[-1] if "additional traits" in system_text else True)
-
-    for f in ("V2_PLAN.md", "MY.TRAIT.txt"):
-        os.remove(os.path.join(tmp, "traits", f))
-
-    # --- heartbeat ---
-
-    r, logs, _ = call_hook(hook, "heartbeat")
-    check("heartbeat returns system key", has_key(r, "system"))
-    check("heartbeat returns user key", has_key(r, "user"))
-    system_text = "\n".join(r.get("system", []))
-    check("heartbeat includes preamble", "preamble" in system_text)
-    check("heartbeat includes heartbeat prompt", "heartbeat" in system_text)
-    check("heartbeat logs core traits", any("core:" in l for l in logs))
-
-    # --- recover ---
-
-    r, logs, _ = call_hook(hook, "recover", {"failed_hook": "mutate_request", "error": "boom"})
-    check("recover returns system key", has_key(r, "system"))
-    check("recover returns user key", has_key(r, "user"))
-    system_text = "\n".join(r.get("system", []))
-    check("recover includes preamble", "preamble" in system_text)
-    check("recover includes recover prompt", "recover" in system_text)
-    check("recover logs context", any("recovering from mutate_request" in l for l in logs))
-
-    # --- observe_message ---
-
-    _, logs, _ = call_hook(hook, "observe_message", {"session": {"id": "abc", "agent": "per"}})
-    check("observe_message logs session", any("session=abc" in l for l in logs))
-    check("observe_message logs agent", any("agent=per" in l for l in logs))
-
-    # --- before_stop ---
-
-    r, logs, _ = call_hook(hook, "before_stop", {"session": {"id": "s1", "agent": "per"}, "answer": "hello"})
-    check("before_stop returns empty by default", not has_key(r, "continue"))
-    check("before_stop logs session", any("session=s1" in l for l in logs))
-    check("before_stop logs answer length", any("answer_len=5" in l for l in logs))
-
-    # --- before_stop v2 payload (exit_reason, final, error) ---
-
-    r, logs, _ = call_hook(hook, "before_stop", {
-        "session": {"id": "s2", "agent": "per"}, "answer": "",
-        "exit_reason": "stop", "final": True,
-    })
-    check("before_stop logs exit_reason", any("exit_reason=stop" in l for l in logs))
-    check("before_stop logs final flag", any("final=True" in l for l in logs))
-
-    r, logs, _ = call_hook(hook, "before_stop", {
-        "session": {"id": "s3", "agent": "per"}, "answer": "",
-        "exit_reason": "error", "final": True, "error": "network broke",
-    })
-    check("before_stop logs error reason", any("exit_reason=error" in l for l in logs))
-    check("before_stop logs error string", any("error=network broke" in l for l in logs))
-
-    # --- mutate_request v2 payload surfacing (host, model, user) ---
-
-    r, logs, _ = call_hook(hook, "mutate_request", {
-        "host": {"name": "airun", "version": 2, "stages": ["mutate_request", "before_stop"]},
-        "system": "any composed prompt here",
-        "user": "the user prompt",
-        "model": "anthropic/claude-opus-4-7",
-    })
-    check("mutate_request logs host name+version", any("host=airun v=2" in l for l in logs))
-    check("mutate_request logs model", any("model=anthropic/claude-opus-4-7" in l for l in logs))
-    check("mutate_request logs user_len", any("user_len=15" in l for l in logs))
-    check("mutate_request returns system unconditionally", has_key(r, "system"))
-
-    # --- compacting ---
-
-    r, logs, _ = call_hook(hook, "compacting")
-    check("compacting returns the compaction.md prompt", "compaction" in (r.get("prompt") or ""), f"got: {r}")
-    check("compacting logs core traits", any("core:" in l for l in logs))
-
-    # --- trait_list ---
-
-    open(os.path.join(tmp, "traits", "CORE.md"), "w").write("a")
-    open(os.path.join(tmp, "traits", "notes.md"), "w").write("b")
-    open(os.path.join(tmp, "traits", ".hidden.md"), "w").write("c")
-    open(os.path.join(tmp, "traits", "V2_PLAN.md"), "w").write("d")
-    open(os.path.join(tmp, "traits", "MY.TRAIT.txt"), "w").write("e")
-
-    r, logs, _ = call_tool(hook, "trait_list")
-    check("trait_list returns result key", has_key(r, "result"))
-    check("trait_list result is str", isinstance(r.get("result"), str), f"got: {type(r.get('result')).__name__}")
-    check("trait_list has no results typo", not has_key(r, "results"))
-    # must use {trait:NAME} format
-    check("trait_list uses trait: format for CORE", "{trait:CORE.md}" in r["result"])
-    check("trait_list uses trait: format for notes", "{trait:notes.md}" in r["result"])
-    check("trait_list excludes hidden", ".hidden.md" not in r["result"])
-    check("trait_list includes digits+underscore core", "{trait:V2_PLAN.md}" in r["result"])
-    check("trait_list includes dot-stem any-ext core", "{trait:MY.TRAIT.txt}" in r["result"])
-    check("trait_list logs tool name", any("tool=trait_list" in l for l in logs))
-    # no avatar prefix
-    check("trait_list no avatar prefix", not r["result"].startswith("🌀"))
-
-    r, _, _ = call_tool(hook, "trait_list", {"include_hidden": "true"})
-    check("trait_list hidden includes hidden", "{trait:.hidden.md}" in r["result"])
-    check("trait_list hidden includes core", "{trait:CORE.md}" in r["result"])
-
-    # bool args from JSON (LLM sends true not "true")
-    r, _, _ = call_tool(hook, "trait_list", {"include_hidden": True})
-    check("trait_list bool true includes hidden", ".hidden.md" in r["result"])
-
-    r, _, _ = call_tool(hook, "trait_list", {"include_hidden": False})
-    check("trait_list bool false excludes hidden", ".hidden.md" not in r["result"])
-
-    # trait_list includes subdirectory traits with relative paths
-    os.makedirs(os.path.join(tmp, "traits", "topics"), exist_ok=True)
-    open(os.path.join(tmp, "traits", "topics", "music.md"), "w").write("f")
-    r, _, _ = call_tool(hook, "trait_list")
-    check("trait_list includes subdir trait", "{trait:topics/music.md}" in r["result"])
-    os.remove(os.path.join(tmp, "traits", "topics", "music.md"))
-    os.rmdir(os.path.join(tmp, "traits", "topics"))
-
-    for f in ("CORE.md", "notes.md", ".hidden.md", "V2_PLAN.md", "MY.TRAIT.txt"):
-        os.remove(os.path.join(tmp, "traits", f))
-
-    # --- trait_read + format_trait contract ---
-
-    open(os.path.join(tmp, "traits", "A.md"), "w").write("test content")
-
-    r, _, _ = call_tool(hook, "trait_read", {"trait": "A.md"})
-    check("trait_read returns result key", has_key(r, "result"))
-    check("trait_read result is str", isinstance(r.get("result"), str), f"got: {type(r.get('result')).__name__}")
-    check("trait_read returns content", "test content" in r["result"])
-    # format_trait must produce: \n{trait:A.md}\n<content>\n
-    trait_text = r["result"]
-    check("format_trait has trait tag", "{trait:A.md}" in trait_text, f"got: {trait_text!r}")
-    # no avatar prefix
-    check("trait_read no avatar prefix", not trait_text.startswith("🌀"))
-    # content must appear verbatim after trait tag
-    tag_end = trait_text.find("{trait:A.md}") + len("{trait:A.md}")
-    after_tag = trait_text[tag_end:].strip()
-    check("format_trait content is verbatim", after_tag == "test content",
-          f"got: {after_tag!r}")
-
-    r, _, _ = call_tool(hook, "trait_read", {"trait": "MISSING.md"})
-    check("trait_read missing returns result key", has_key(r, "result"))
-    check("trait_read missing returns empty marker", "(empty)" in r["result"])
-
-    # --- trait_read offset/limit ---
-
-    open(os.path.join(tmp, "traits", "LINES.md"), "w").write("line1\nline2\nline3\nline4\nline5")
-
-    r, _, _ = call_tool(hook, "trait_read", {"trait": "LINES.md", "offset": "3", "limit": "2"})
-    check("trait_read offset/limit returns result", has_key(r, "result"))
-    check("trait_read offset skips lines", "line1" not in r["result"])
-    check("trait_read offset starts at right line", "line3" in r["result"])
-    check("trait_read limit caps lines", "line5" not in r["result"])
-
-    r, _, _ = call_tool(hook, "trait_read", {"trait": "LINES.md", "offset": "1"})
-    check("trait_read offset-only returns first line", "line1" in r["result"])
-    check("trait_read offset-only returns all lines", "line5" in r["result"])
-
-    r, _, _ = call_tool(hook, "trait_read", {"trait": "LINES.md", "limit": "2"})
-    check("trait_read limit-only returns first line", "line1" in r["result"])
-
-    # --- trait_write ---
-
-    r, _, _ = call_tool(hook, "trait_write", {"trait": "NEW.md", "content": "hello world"})
-    check("trait_write returns result key", has_key(r, "result"))
-    # structured response
-    parsed = result_json(r)
-    check("trait_write returns success json", parsed.get("success") is True, f"got: {parsed}")
-    check("trait_write reports modified", has_key(r, "modified"))
-    check("trait_write modified list correct", r.get("modified") == ["NEW.md"])
-    content = open(os.path.join(tmp, "traits", "NEW.md")).read()
-    check("trait_write wrote file", content == "hello world")
-
-    # --- trait_edit ---
-
-    open(os.path.join(tmp, "traits", "PATCH.md"), "w").write("old text here")
-
-    r, _, _ = call_tool(hook, "trait_edit", {"trait": "PATCH.md", "oldString": "old text", "newString": "new text"})
-    check("trait_edit returns result key", has_key(r, "result"))
-    parsed = result_json(r)
-    check("trait_edit returns success json", parsed.get("success") is True, f"got: {parsed}")
-    check("trait_edit reports replacements count", parsed.get("replacements") == 1, f"got: {parsed}")
-    check("trait_edit reports modified", has_key(r, "modified"))
-    content = open(os.path.join(tmp, "traits", "PATCH.md")).read()
-    check("trait_edit updated file", content == "new text here")
-
-    r, _, _ = call_tool(hook, "trait_edit", {"trait": "PATCH.md", "oldString": "nonexistent", "newString": "x"})
-    parsed = result_json(r)
-    check("trait_edit not found returns error", "error" in parsed, f"got: {parsed}")
-
-    open(os.path.join(tmp, "traits", "DUP.md"), "w").write("aaa")
-    r, _, _ = call_tool(hook, "trait_edit", {"trait": "DUP.md", "oldString": "a", "newString": "b"})
-    parsed = result_json(r)
-    check("trait_edit multiple matches returns error", "error" in parsed, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "trait_edit", {"trait": "DUP.md", "oldString": "a", "newString": "b", "replaceAll": "true"})
-    parsed = result_json(r)
-    check("trait_edit replaceAll reports replacements count", parsed.get("replacements") == 3, f"got: {parsed}")
-
-    # --- trait_append ---
-
-    open(os.path.join(tmp, "traits", "APPEND.md"), "w").write("line one")
-
-    r, logs, _ = call_tool(hook, "trait_append", {"trait": "APPEND.md", "content": "line two"})
-    check("trait_append returns result key", has_key(r, "result"))
-    parsed = result_json(r)
-    check("trait_append returns success json", parsed.get("success") is True, f"got: {parsed}")
-    check("trait_append echoes appended content", parsed.get("appended") == "line two", f"got: {parsed}")
-    check("trait_append reports modified", r.get("modified") == ["APPEND.md"])
-    content = open(os.path.join(tmp, "traits", "APPEND.md")).read()
-    check("trait_append appended content", content == "line one\nline two")
-
-    r, _, _ = call_tool(hook, "trait_append", {"trait": "NEWFILE.md", "content": "created by append"})
-    parsed = result_json(r)
-    check("trait_append creates new file", parsed.get("success") is True, f"got: {parsed}")
-    content = open(os.path.join(tmp, "traits", "NEWFILE.md")).read()
-    check("trait_append new file content", content == "\ncreated by append")
-
-    # --- trait_delete ---
-
-    open(os.path.join(tmp, "traits", "DEL.md"), "w").write("delete me")
-
-    r, logs, _ = call_tool(hook, "trait_delete", {"trait": "DEL.md"})
-    check("trait_delete returns result key", has_key(r, "result"))
-    parsed = result_json(r)
-    check("trait_delete returns success json", parsed.get("success") is True, f"got: {parsed}")
-    check("trait_delete reports modified", r.get("modified") == ["DEL.md"])
-    check("trait_delete removed file", not os.path.exists(os.path.join(tmp, "traits", "DEL.md")))
-    check("trait_delete logs tool name", any("tool=trait_delete" in l for l in logs))
-
-    r, _, _ = call_tool(hook, "trait_delete", {"trait": "DEL.md"})
-    parsed = result_json(r)
-    check("trait_delete not found returns error", "error" in parsed, f"got: {parsed}")
-
-    # --- trait_move ---
-
-    open(os.path.join(tmp, "traits", "SRC.md"), "w").write("move me")
-
-    r, logs, _ = call_tool(hook, "trait_move", {"old_trait": "SRC.md", "new_trait": "DST.md"})
-    check("trait_move returns result key", has_key(r, "result"))
-    parsed = result_json(r)
-    check("trait_move returns success json", parsed.get("success") is True, f"got: {parsed}")
-    check("trait_move reports both modified", set(r.get("modified", [])) == {"SRC.md", "DST.md"})
-    check("trait_move removed src", not os.path.exists(os.path.join(tmp, "traits", "SRC.md")))
-    check("trait_move created dst", os.path.exists(os.path.join(tmp, "traits", "DST.md")))
-    content = open(os.path.join(tmp, "traits", "DST.md")).read()
-    check("trait_move preserved content", content == "move me")
-    check("trait_move logs tool name", any("tool=trait_move" in l for l in logs))
-
-    r, _, _ = call_tool(hook, "trait_move", {"old_trait": "MISSING.md", "new_trait": "X.md"})
-    parsed = result_json(r)
-    check("trait_move not found returns error", "error" in parsed, f"got: {parsed}")
-
-    open(os.path.join(tmp, "traits", "EXIST.md"), "w").write("x")
-    r, _, _ = call_tool(hook, "trait_move", {"old_trait": "DST.md", "new_trait": "EXIST.md"})
-    parsed = result_json(r)
-    check("trait_move already exists returns error", "error" in parsed, f"got: {parsed}")
-
-    for f in ("DST.md", "EXIST.md"):
-        os.remove(os.path.join(tmp, "traits", f))
-
-    # --- trait directory handling ---
-
-    # trait_write creates parent directories
-    r, _, _ = call_tool(hook, "trait_write", {"trait": "sub/deep/NESTED.md", "content": "nested"})
-    check("trait_write creates parent dirs", os.path.exists(os.path.join(tmp, "traits", "sub", "deep", "NESTED.md")))
-    parsed = result_json(r)
-    check("trait_write nested success", parsed.get("success") is True)
-    content = open(os.path.join(tmp, "traits", "sub", "deep", "NESTED.md")).read()
-    check("trait_write nested content correct", content == "nested")
-
-    # trait_delete removes empty parent directories
-    r, _, _ = call_tool(hook, "trait_delete", {"trait": "sub/deep/NESTED.md"})
-    parsed = result_json(r)
-    check("trait_delete nested success", parsed.get("success") is True)
-    check("trait_delete removed nested file", not os.path.exists(os.path.join(tmp, "traits", "sub", "deep", "NESTED.md")))
-    check("trait_delete removed empty deep dir", not os.path.exists(os.path.join(tmp, "traits", "sub", "deep")))
-    check("trait_delete removed empty sub dir", not os.path.exists(os.path.join(tmp, "traits", "sub")))
-    check("trait_delete preserves traits dir", os.path.isdir(os.path.join(tmp, "traits")))
-
-    # trait_delete does not remove non-empty parent directories
-    os.makedirs(os.path.join(tmp, "traits", "keep", "inner"), exist_ok=True)
-    open(os.path.join(tmp, "traits", "keep", "sibling.md"), "w").write("keep me")
-    open(os.path.join(tmp, "traits", "keep", "inner", "DEL.md"), "w").write("delete me")
-    r, _, _ = call_tool(hook, "trait_delete", {"trait": "keep/inner/DEL.md"})
-    check("trait_delete removed inner file", not os.path.exists(os.path.join(tmp, "traits", "keep", "inner", "DEL.md")))
-    check("trait_delete removed empty inner dir", not os.path.exists(os.path.join(tmp, "traits", "keep", "inner")))
-    check("trait_delete kept non-empty parent", os.path.isdir(os.path.join(tmp, "traits", "keep")))
-    check("trait_delete kept sibling file", os.path.exists(os.path.join(tmp, "traits", "keep", "sibling.md")))
-    os.remove(os.path.join(tmp, "traits", "keep", "sibling.md"))
-    os.rmdir(os.path.join(tmp, "traits", "keep"))
-
-    # trait_move creates destination parent directories
-    open(os.path.join(tmp, "traits", "MVSRC.md"), "w").write("move to subdir")
-    r, _, _ = call_tool(hook, "trait_move", {"old_trait": "MVSRC.md", "new_trait": "newdir/deep/MVDST.md"})
-    check("trait_move creates dst dirs", os.path.exists(os.path.join(tmp, "traits", "newdir", "deep", "MVDST.md")))
-    parsed = result_json(r)
-    check("trait_move to subdir success", parsed.get("success") is True)
-    content = open(os.path.join(tmp, "traits", "newdir", "deep", "MVDST.md")).read()
-    check("trait_move to subdir content", content == "move to subdir")
-
-    # trait_move cleans up empty source parent directories
-    r, _, _ = call_tool(hook, "trait_move", {"old_trait": "newdir/deep/MVDST.md", "new_trait": "MVBACK.md"})
-    parsed = result_json(r)
-    check("trait_move from subdir success", parsed.get("success") is True)
-    check("trait_move cleaned empty deep dir", not os.path.exists(os.path.join(tmp, "traits", "newdir", "deep")))
-    check("trait_move cleaned empty newdir", not os.path.exists(os.path.join(tmp, "traits", "newdir")))
-    check("trait_move preserves traits dir", os.path.isdir(os.path.join(tmp, "traits")))
-    os.remove(os.path.join(tmp, "traits", "MVBACK.md"))
-
-    # --- tool handlers return notify ---
-
-    open(os.path.join(tmp, "traits", "NOTIFY.md"), "w").write("x")
-
-    r, _, _ = call_tool(hook, "trait_write", {"trait": "NOTIFY.md", "content": "updated"})
-    check("trait_write returns notify", has_key(r, "notify"))
-    check("trait_write notify is list", isinstance(r.get("notify"), list))
-    check("trait_write notify has trait_changed", any(n.get("type") == "trait_changed" for n in r.get("notify", [])))
-    check("trait_write notify includes file", any("NOTIFY.md" in n.get("files", []) for n in r.get("notify", [])))
-
-    r, _, _ = call_tool(hook, "trait_edit", {"trait": "NOTIFY.md", "oldString": "updated", "newString": "patched"})
-    check("trait_edit returns notify", has_key(r, "notify"))
-    check("trait_edit notify has trait_changed", any(n.get("type") == "trait_changed" for n in r.get("notify", [])))
-
-    r, _, _ = call_tool(hook, "trait_move", {"old_trait": "NOTIFY.md", "new_trait": "NOTIFY2.md"})
-    check("trait_move returns notify", has_key(r, "notify"))
-    check("trait_move notify includes both files",
-          any(set(n.get("files", [])) == {"NOTIFY.md", "NOTIFY2.md"} for n in r.get("notify", [])))
-
-    r, _, _ = call_tool(hook, "trait_delete", {"trait": "NOTIFY2.md"})
-    check("trait_delete returns notify", has_key(r, "notify"))
-    check("trait_delete notify has trait_changed", any(n.get("type") == "trait_changed" for n in r.get("notify", [])))
-
-    # --- format_notification ---
-
-    r, _, _ = call_hook(hook, "format_notification", {
-        "notifications": [{"type": "trait_changed", "files": ["FOO.md", "BAR.md"]}],
-    })
-    check("format_notification returns message", has_key(r, "message"))
-    check("format_notification message has update text", "traits were updated" in r.get("message", ""))
-    check("format_notification message includes files", "BAR.md" in r.get("message", "") and "FOO.md" in r.get("message", ""))
-
-    r, _, _ = call_hook(hook, "format_notification", {"notifications": []})
-    check("format_notification empty returns no message", not has_key(r, "message"))
-
-    r, _, _ = call_hook(hook, "format_notification", {})
-    check("format_notification missing key returns no message", not has_key(r, "message"))
-
-    # --- no avatar prefix on any tool results ---
-
-    open(os.path.join(tmp, "traits", "AV.md"), "w").write("avatar test")
-
-    r, _, _ = call_tool(hook, "trait_list")
-    check("trait_list no avatar", "🌀" not in r.get("result", ""))
-
-    r, _, _ = call_tool(hook, "trait_read", {"trait": "AV.md"})
-    check("trait_read no avatar", "🌀" not in r.get("result", ""))
-
-    r, _, _ = call_tool(hook, "trait_write", {"trait": "AV.md", "content": "x"})
-    check("trait_write no avatar", "🌀" not in r.get("result", ""))
-
-    r, _, _ = call_tool(hook, "trait_delete", {"trait": "AV.md"})
-    check("trait_delete no avatar", "🌀" not in r.get("result", ""))
-
-    # --- avatar prefix still on hook debug logs ---
-
-    _, logs, _ = call_hook(hook, "mutate_request")
-    check("hook debug logs have avatar prefix", any(l.startswith("[🌀]") for l in logs),
-          f"got: {logs}")
-
-    # --- unknown tool ---
-
-    r, _, _ = call_tool(hook, "nonexistent")
-    check("unknown tool returns result key", has_key(r, "result"))
-    parsed = result_json(r)
-    check("unknown tool returns error json", "error" in parsed, f"got: {parsed}")
-
-    # --- bad args ---
-
-    r, _, _ = call_tool(hook, "trait_read", {"wrong": "param"})
-    check("bad args returns result key", has_key(r, "result"))
-    parsed = result_json(r)
-    check("bad args returns error json", "error" in parsed, f"got: {parsed}")
-
-    # --- empty stdin ---
-
-    r, _, _ = call_hook(hook, "mutate_request")
-    check("empty context returns system key", has_key(r, "system"))
-
-    # --- history passthrough ---
-    # hooks must accept a history field in context without breaking
-
-    sample_history = [
-        {"role": "user", "agent": "per", "parts": [{"type": "text", "text": "hello"}]},
-        {"role": "assistant", "agent": "per", "parts": [{"type": "text", "text": "hi there"}]},
-    ]
-
-    r, _, _ = call_hook(hook, "mutate_request", {"history": sample_history})
-    check("mutate_request with history returns system", has_key(r, "system"))
-
-    r, _, _ = call_hook(hook, "mutate_request", {"history": sample_history})
-    check("mutate_request with history returns system", has_key(r, "system"))
-
-    r, logs, _ = call_hook(hook, "observe_message", {
-        "session": {"id": "h1", "agent": "per"}, "history": sample_history,
-    })
-    check("observe_message with history logs session", any("session=h1" in l for l in logs))
-
-    r, logs, _ = call_hook(hook, "before_stop", {
-        "session": {"id": "h2", "agent": "per"}, "answer": "ok", "history": sample_history,
-    })
-    check("before_stop with history returns ok", not has_key(r, "error"))
-    check("before_stop with history logs session", any("session=h2" in l for l in logs))
-
-    r, _, _ = call_hook(hook, "heartbeat", {"history": sample_history})
-    check("heartbeat with history returns system", has_key(r, "system"))
-
-    r, _, _ = call_hook(hook, "compacting", {"history": sample_history})
-    check("compacting with history returns the compaction prompt", has_key(r, "prompt"))
-
-    r, _, _ = call_hook(hook, "recover", {"failed_hook": "test", "error": "x", "history": sample_history})
-    check("recover with history returns system", has_key(r, "system"))
-
-    r, _, _ = call_hook(hook, "format_notification", {
-        "notifications": [{"type": "trait_changed", "files": ["X.md"]}], "history": sample_history,
-    })
-    check("format_notification with history returns message", has_key(r, "message"))
-
-    r, _, _ = call_hook(hook, "before_tool", {
-        "session": {"id": "h3"}, "tool": "t", "callID": "c", "args": {}, "history": sample_history,
-    })
-    check("before_tool with history ok", not has_key(r, "error"))
-
-    r, _, _ = call_hook(hook, "after_tool", {
-        "session": {"id": "h3"}, "tool": "t", "callID": "c", "title": "", "output": "", "history": sample_history,
-    })
-    check("after_tool with history ok", not has_key(r, "error"))
-
-    # --- path traversal ---
-
-    traversal_paths = ["../hooks/persona.py", "../../etc/passwd", "foo/../../bar.md"]
-
-    for bad in traversal_paths:
-        r, _, _ = call_tool(hook, "trait_read", {"trait": bad})
-        parsed = result_json(r)
-        check(f"trait_read rejects traversal ({bad})", "error" in parsed,
-              f"got: {parsed}")
-
-        r, _, _ = call_tool(hook, "trait_write", {"trait": bad, "content": "pwned"})
-        parsed = result_json(r)
-        check(f"trait_write rejects traversal ({bad})", "error" in parsed,
-              f"got: {parsed}")
-        # verify no file was written at the traversal target
-        target = os.path.normpath(os.path.join(tmp, "traits", bad))
-        if os.path.exists(target):
-            check(f"trait_write did not modify outside traits ({bad})",
-                  open(target).read() != "pwned", f"file at {target} was overwritten")
-        else:
-            check(f"trait_write did not write outside traits ({bad})", True)
-
-        r, _, _ = call_tool(hook, "trait_edit", {"trait": bad, "oldString": "x", "newString": "y"})
-        parsed = result_json(r)
-        check(f"trait_edit rejects traversal ({bad})", "error" in parsed,
-              f"got: {parsed}")
-
-        open(os.path.join(tmp, "traits", "SAFE.md"), "w").write("safe")
-        r, _, _ = call_tool(hook, "trait_delete", {"trait": bad})
-        parsed = result_json(r)
-        check(f"trait_delete rejects traversal ({bad})", "error" in parsed,
-              f"got: {parsed}")
-
-        r, _, _ = call_tool(hook, "trait_move", {"old_trait": "SAFE.md", "new_trait": bad})
-        parsed = result_json(r)
-        check(f"trait_move rejects traversal dst ({bad})", "error" in parsed,
-              f"got: {parsed}")
-
-        r, _, _ = call_tool(hook, "trait_move", {"old_trait": bad, "new_trait": "SAFE2.md"})
-        parsed = result_json(r)
-        check(f"trait_move rejects traversal src ({bad})", "error" in parsed,
-              f"got: {parsed}")
-
-        os.remove(os.path.join(tmp, "traits", "SAFE.md"))
-
-    # absolute path traversal
-    r, _, _ = call_tool(hook, "trait_write", {"trait": "/etc/passwd", "content": "pwned"})
-    parsed = result_json(r)
-    check("trait_write rejects absolute path", "error" in parsed,
-          f"got: {parsed}")
-
-    # --- data_query (replaces data_read + data_list) ---
-
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"a": 1, "b": {"c": [10, 20, 30]}}')
-
-    # basic read: returns full dict
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".test.json", "key": "."})
-    parsed = result_json(r)
-    check("data_query returns full object", parsed == {"a": 1, "b": {"c": [10, 20, 30]}},
-          f"got: {parsed}")
-
-    # dot-path key selector
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".test.json", "key": "a"})
-    parsed = result_json(r)
-    check("data_query key selector", parsed == 1, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".test.json", "key": "b.c"})
-    parsed = result_json(r)
-    check("data_query nested selector", parsed == [10, 20, 30], f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".test.json", "key": "b.c.1"})
-    parsed = result_json(r)
-    check("data_query array index", parsed == 20, f"got: {parsed}")
-
-    # error cases
-    r, _, _ = call_tool(hook, "data_query", {"trait": "noext", "key": "."})
-    parsed = result_json(r)
-    check("data_query rejects non-.json", "error" in parsed, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".missing.json", "key": "."})
-    parsed = result_json(r)
-    check("data_query missing file", "error" in parsed, f"got: {parsed}")
-
-    # --- data_query on dict-of-dicts (replaces data_list) ---
-
-    open(os.path.join(tmp, "traits", ".dl.json"), "w").write(json.dumps({
-        "id1": {"title": "alpha", "status": "open", "due": "2026-04-01T00:00:00.000+00:00"},
-        "id2": {"title": "beta", "status": "done", "due": "2026-05-01T00:00:00.000+00:00"},
-        "id3": {"title": "gamma", "status": "open", "owner": "tom"},
-    }))
-
-    # no filter: returns full dict
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": "."})
-    parsed = result_json(r)
-    check("data_query dict returns all keys", set(parsed.keys()) == {"id1", "id2", "id3"},
-          f"got: {list(parsed.keys())}")
-    check("data_query dict preserves values", parsed["id1"]["title"] == "alpha")
-
-    # --- data_query MongoDB-style filter: exact match ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"status": "open"}})
-    parsed = result_json(r)
-    check("data_query filter exact match", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $in ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"status": {"$in": ["open", "done"]}}})
-    parsed = result_json(r)
-    check("data_query filter $in", set(parsed.keys()) == {"id1", "id2", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: id matching via $in ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"id": {"$in": ["id1", "id3"]}}})
-    parsed = result_json(r)
-    check("data_query filter id $in", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # single id match
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"id": "id2"}})
-    parsed = result_json(r)
-    check("data_query filter id exact", set(parsed.keys()) == {"id2"},
-          f"got: {list(parsed.keys())}")
-
-    # missing id returns empty dict
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"id": "missing"}})
-    parsed = result_json(r)
-    check("data_query filter id missing", parsed == {}, f"got: {parsed}")
-
-    # --- data_query MongoDB-style filter: $lt, $gt, $lte, $gte ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"due": {"$lt": "2026-04-15T00:00:00.000+00:00"}}})
-    parsed = result_json(r)
-    check("data_query filter $lt", set(parsed.keys()) == {"id1"},
-          f"got: {list(parsed.keys())}")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"due": {"$gte": "2026-05-01T00:00:00.000+00:00"}}})
-    parsed = result_json(r)
-    check("data_query filter $gte", set(parsed.keys()) == {"id2"},
-          f"got: {list(parsed.keys())}")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"due": {"$gt": "2026-04-01T00:00:00.000+00:00",
-                                                                  "$lte": "2026-05-01T00:00:00.000+00:00"}}})
-    parsed = result_json(r)
-    check("data_query filter $gt + $lte range", set(parsed.keys()) == {"id2"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $eq ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"status": {"$eq": "open"}}})
-    parsed = result_json(r)
-    check("data_query filter $eq", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $regex ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"title": {"$regex": "^a"}}})
-    parsed = result_json(r)
-    check("data_query filter $regex", set(parsed.keys()) == {"id1"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $regex with $options ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"title": {"$regex": "^A", "$options": "i"}}})
-    parsed = result_json(r)
-    check("data_query filter $regex + $options i", set(parsed.keys()) == {"id1"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $not ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"status": {"$not": "done"}}})
-    parsed = result_json(r)
-    check("data_query filter $not", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $ne (alias for $not) ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"status": {"$ne": "done"}}})
-    parsed = result_json(r)
-    check("data_query filter $ne", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $nin ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"status": {"$nin": ["done", "error"]}}})
-    parsed = result_json(r)
-    check("data_query filter $nin", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query MongoDB-style filter: $or (top-level) ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"$or": [
-                                                  {"status": "done"},
-                                                  {"owner": "tom"}
-                                              ]}})
-    parsed = result_json(r)
-    check("data_query filter $or", set(parsed.keys()) == {"id2", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query filter on entries missing the filtered field ---
-    # entries without the filtered field should not match
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"owner": "tom"}})
-    parsed = result_json(r)
-    check("data_query filter skips entries without field", set(parsed.keys()) == {"id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query with fields param (array type) ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "fields": ["title", "status"]})
-    parsed = result_json(r)
-    check("data_query fields projection keys", set(parsed.keys()) == {"id1", "id2", "id3"})
-    check("data_query fields includes title", "title" in parsed["id1"])
-    check("data_query fields includes status", "status" in parsed["id1"])
-    check("data_query fields excludes due", "due" not in parsed["id1"])
-
-    # --- data_query with limit and offset ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".", "limit": "1"})
-    parsed = result_json(r)
-    check("data_query limit", len(parsed) == 1, f"got: {len(parsed)}")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".", "limit": "1", "offset": "1"})
-    parsed = result_json(r)
-    check("data_query offset", len(parsed) == 1, f"got: {len(parsed)}")
-
-    # --- data_query filter + fields combined ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"status": "open"},
-                                              "fields": ["title"]})
-    parsed = result_json(r)
-    check("data_query filter + fields", set(parsed.keys()) == {"id1", "id3"})
-    check("data_query filter + fields projection", set(parsed["id1"].keys()) == {"title"},
-          f"got: {list(parsed['id1'].keys())}")
-
-    # --- data_query bad regex in $regex ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": {"title": {"$regex": "[invalid"}}})
-    parsed = result_json(r)
-    check("data_query bad $regex returns error", "error" in parsed, f"got: {parsed}")
-
-    # --- data_query string-coerced filter (LLM sends string instead of object) ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": '{"status": "open"}'})
-    parsed = result_json(r)
-    check("data_query coerced string filter", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query mangled quote tokens in filter ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": '{<|"|>status<|"|>: <|"|>open<|"|>}'})
-    parsed = result_json(r)
-    check("data_query mangled quote filter", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query mangled filter with unquoted keys and wrong brackets ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": '{status: <|"|>open<|"|>}'})
-    parsed = result_json(r)
-    check("data_query unquoted keys filter", set(parsed.keys()) == {"id1", "id3"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query mangled filter with ]] instead of }} ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": '{due:{$lt:<|"|>2026-04-15T00:00:00.000+00:00<|"|>]}'})
-    parsed = result_json(r)
-    check("data_query bracket mismatch filter", set(parsed.keys()) == {"id1"},
-          f"got: {list(parsed.keys())}")
-
-    # --- data_query unparseable filter returns error ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".dl.json", "key": ".",
-                                              "filter": "not json at all"})
-    parsed = result_json(r)
-    check("data_query unparseable filter error", "error" in parsed, f"got: {parsed}")
-
-    os.remove(os.path.join(tmp, "traits", ".dl.json"))
-    os.remove(os.path.join(tmp, "traits", ".test.json"))
-
-    # --- data_update: $set ---
-
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"a": 1, "b": {"c": [10, 20, 30]}}')
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"a": 42}}})
-    parsed = result_json(r)
-    check("data_update $set returns success", parsed.get("success") is True, f"got: {parsed}")
-    check("data_update reports modified_paths", parsed.get("modified_paths") == ["a"], f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $set value correct", data["a"] == 42)
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
-        "ops": {"$set": {"m": 1, "n": 2}, "$unset": {"a": ""}}})
-    parsed = result_json(r)
-    check("data_update multi-op modified_paths lists all", sorted(parsed.get("modified_paths", [])) == ["a", "m", "n"],
-          f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"b.c.0": 99}}})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $set nested array index", data["b"]["c"][0] == 99)
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"new_key": "hello"}}})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $set creates new key in dict", data.get("new_key") == "hello")
-
-    # $set auto-creates intermediate dicts
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {"x.y.z": 1}}})
-    parsed = result_json(r)
-    check("data_update $set autocreates nested path", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $set nested path value", data["x"]["y"]["z"] == 1)
-
-    # $set at root is rejected (use trait_write to replace whole file)
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {".": {"fresh": True}}}})
-    parsed = result_json(r)
-    check("data_update $set root rejected", "error" in parsed, f"got: {parsed}")
-    check("data_update $set root suggests trait_write",
-          "persona_trait_write" in parsed.get("error", ""), f"got: {parsed}")
-
-    # $set multiple fields at once
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
-                                              "ops": {"$set": {"color": "blue", "size": "large"}}})
-    check("data_update $set returns modified", has_key(r, "modified"))
-    check("data_update $set returns notify", has_key(r, "notify"))
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $set batch", data.get("color") == "blue" and data.get("size") == "large")
-
-    # ops must be non-empty object
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {}})
-    parsed = result_json(r)
-    check("data_update empty ops returns error", "error" in parsed, f"got: {parsed}")
-
-    # unknown operator returns error
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$bogus": {"a": 1}}})
-    parsed = result_json(r)
-    check("data_update unknown op returns error", "error" in parsed, f"got: {parsed}")
-
-    # auto-create non-existent trait via $set
-    new_trait = ".autocreated.json"
-    new_path = os.path.join(tmp, "traits", new_trait)
-    assert not os.path.exists(new_path), "precondition: trait should not exist yet"
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": new_trait, "ops": {"$set": {"foo": "bar"}}})
-    parsed = result_json(r)
-    check("data_update auto-creates trait", parsed.get("success") is True)
-    data = json.loads(open(new_path).read())
-    check("data_update auto-created content", data == {"foo": "bar"})
-
-    # --- data_update: $unset ---
-
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"x": 1, "y": 2, "arr": [10, 20, 30]}')
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {"x": ""}}})
-    parsed = result_json(r)
-    check("data_update $unset returns success", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $unset key gone", "x" not in data)
-    check("data_update $unset other keys intact", data.get("y") == 2)
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {"arr.1": ""}}})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $unset array index", data["arr"] == [10, 30])
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {"nonexistent": ""}}})
-    parsed = result_json(r)
-    check("data_update $unset missing key returns error", "error" in parsed, f"got: {parsed}")
-
-    # $unset at root is rejected (use trait_delete to remove the whole file)
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$unset": {".": ""}}})
-    parsed = result_json(r)
-    check("data_update $unset root returns error", "error" in parsed, f"got: {parsed}")
-    check("data_update $unset root suggests trait_delete",
-          "persona_trait_delete" in parsed.get("error", ""), f"got: {parsed}")
-
-    # --- data_update: $push ---
-
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"items": [1, 2]}')
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {"items": 3}}})
-    parsed = result_json(r)
-    check("data_update $push returns success", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $push scalar", data["items"] == [1, 2, 3])
-
-    # $push with $each extends
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
-                                              "ops": {"$push": {"items": {"$each": [4, 5]}}}})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $push $each", data["items"] == [1, 2, 3, 4, 5])
-
-    # $push with list value (no $each) appends the whole list as one element
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
-                                              "ops": {"$push": {"items": [9, 9]}}})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $push list-as-single", data["items"] == [1, 2, 3, 4, 5, [9, 9]])
-
-    # $push to non-array returns error
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"notarray": 1}')
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {"notarray": 1}}})
-    parsed = result_json(r)
-    check("data_update $push non-array returns error", "error" in parsed, f"got: {parsed}")
-
-    # $push auto-creates array at missing path
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{}')
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {"tags": "first"}}})
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update $push auto-creates array", data["tags"] == ["first"])
-
-    # $push at root is rejected
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$push": {".": "first"}}})
-    parsed = result_json(r)
-    check("data_update $push root returns error", "error" in parsed, f"got: {parsed}")
-
-    os.remove(os.path.join(tmp, "traits", ".test.json"))
-
-    # --- data_update: combined operators in one call ---
-
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"color": "red", "tags": ["a"], "old": "x"}')
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json",
-                                              "ops": {"$set": {"color": "blue"},
-                                                      "$push": {"tags": "b"},
-                                                      "$unset": {"old": ""}}})
-    parsed = result_json(r)
-    check("data_update combined ops succeeds", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update combined result",
-          data == {"color": "blue", "tags": ["a", "b"]}, f"got: {data}")
-    os.remove(os.path.join(tmp, "traits", ".test.json"))
-
-    # --- data_update: leading dot in path is stripped ---
-
-    open(os.path.join(tmp, "traits", ".test.json"), "w").write('{"color": "red"}')
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".test.json", "ops": {"$set": {".color": "blue"}}})
-    parsed = result_json(r)
-    check("data_update leading dot path succeeds", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".test.json")).read())
-    check("data_update leading dot path correct", data["color"] == "blue")
-    os.remove(os.path.join(tmp, "traits", ".test.json"))
-
-    # --- data_update / data_query on a corrupt .json trait ---
-    # a .json trait that is not valid JSON (e.g. unescaped quotes left by a bad
-    # trait_edit) must surface a clear error that names the file and points to
-    # the fix, not a bare parser message the LLM mistakes for an input problem.
-
-    open(os.path.join(tmp, "traits", ".corrupt.json"), "w").write('{"accounts": [{"password": "a"b"}]}')
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".corrupt.json",
-                                              "ops": {"$set": {"accounts.0.password": "x"}}})
-    parsed = result_json(r)
-    check("data_update corrupt trait returns error", "error" in parsed, f"got: {parsed}")
-    err = parsed.get("error", "")
-    check("data_update corrupt trait names the file", ".corrupt.json" in err, f"got: {err}")
-    check("data_update corrupt trait flags invalid json", "not valid json" in err.lower(), f"got: {err}")
-    check("data_update corrupt trait suggests trait_write", "persona_trait_write" in err, f"got: {err}")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".corrupt.json", "key": "."})
-    parsed = result_json(r)
-    err = parsed.get("error", "")
-    check("data_query corrupt trait returns error", "error" in parsed, f"got: {parsed}")
-    check("data_query corrupt trait names the file", ".corrupt.json" in err, f"got: {err}")
-    check("data_query corrupt trait flags invalid json", "not valid json" in err.lower(), f"got: {err}")
-
-    os.remove(os.path.join(tmp, "traits", ".corrupt.json"))
-
-    # --- record_query on a corrupt .jsonl trait ---
-
-    open(os.path.join(tmp, "traits", ".corrupt.jsonl"), "w").write('{"type": "note", "content": "ok"}\n{bad line\n')
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".corrupt.jsonl"})
-    parsed = result_json(r)
-    err = parsed.get("error", "")
-    check("record_query corrupt trait returns error", "error" in parsed, f"got: {parsed}")
-    check("record_query corrupt trait names the file", ".corrupt.jsonl" in err, f"got: {err}")
-    check("record_query corrupt trait flags invalid json", "invalid json" in err.lower(), f"got: {err}")
-    check("record_query corrupt trait suggests trait_write", "persona_trait_write" in err, f"got: {err}")
-
-    os.remove(os.path.join(tmp, "traits", ".corrupt.jsonl"))
-
-    # --- data_count ---
-
-    open(os.path.join(tmp, "traits", ".dc.json"), "w").write(json.dumps({
-        "id1": {"title": "alpha", "status": "open", "owner": "tom"},
-        "id2": {"title": "beta", "status": "done", "owner": "tom"},
-        "id3": {"title": "gamma", "status": "open"},
-    }))
-
-    # count all entries
-    r, _, _ = call_tool(hook, "data_count", {"trait": ".dc.json"})
-    parsed = result_json(r)
-    check("data_count returns count", parsed.get("count") == 3, f"got: {parsed}")
-    check("data_count returns field counts", "fields" in parsed, f"got: {parsed}")
-    check("data_count fields has title", parsed["fields"].get("title") == 3)
-    check("data_count fields has owner", parsed["fields"].get("owner") == 2)
-
-    # count with specific field: unique value counts
-    r, _, _ = call_tool(hook, "data_count", {"trait": ".dc.json", "field": "status"})
-    parsed = result_json(r)
-    check("data_count field returns count", parsed.get("count") == 3, f"got: {parsed}")
-    check("data_count field has field name", parsed.get("field") == "status")
-    check("data_count field has values", "values" in parsed)
-    check("data_count field open count", parsed["values"].get("open") == 2)
-    check("data_count field done count", parsed["values"].get("done") == 1)
-
-    # count with filter
-    r, _, _ = call_tool(hook, "data_count", {"trait": ".dc.json",
-                                              "filter": {"status": "open"}})
-    parsed = result_json(r)
-    check("data_count with filter", parsed.get("count") == 2, f"got: {parsed}")
-
-    # count with field + filter
-    r, _, _ = call_tool(hook, "data_count", {"trait": ".dc.json",
-                                              "field": "owner",
-                                              "filter": {"status": "open"}})
-    parsed = result_json(r)
-    check("data_count field + filter count", parsed.get("count") == 2)
-    check("data_count field + filter values", parsed["values"].get("tom") == 1)
-
-    # count missing field
-    r, _, _ = call_tool(hook, "data_count", {"trait": ".dc.json", "field": "nonexistent"})
-    parsed = result_json(r)
-    check("data_count missing field", parsed.get("count") == 3)
-    check("data_count missing field empty values", parsed.get("values") == {})
-
-    # error cases
-    r, _, _ = call_tool(hook, "data_count", {"trait": ".missing.json"})
-    parsed = result_json(r)
-    check("data_count missing file", "error" in parsed, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "data_count", {"trait": "noext"})
-    parsed = result_json(r)
-    check("data_count rejects non-.json", "error" in parsed, f"got: {parsed}")
-
-    os.remove(os.path.join(tmp, "traits", ".dc.json"))
-
-    # --- record_append + record_query + record_count ---
-
-    # auto-create non-existent .jsonl trait
-    new_jsonl = ".auto_records.jsonl"
-    new_jsonl_path = os.path.join(tmp, "traits", new_jsonl)
-    assert not os.path.exists(new_jsonl_path), "precondition: trait should not exist yet"
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": new_jsonl, "fields": {"type": "test"}})
-    parsed = result_json(r)
-    check("record_append auto-creates trait", parsed.get("success") is True)
-    check("record_append auto-created file exists", os.path.exists(new_jsonl_path))
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": new_jsonl})
-    check("record_query on auto-created trait", "1/" in r["result"])
-
-    os.remove(new_jsonl_path)
-
-    # record read tools on non-existent trait return error
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".nonexistent.jsonl"})
-    check("record_query missing trait errors", "error" in r["result"].lower())
-
-    r, _, _ = call_tool(hook, "record_count", {"trait": ".nonexistent.jsonl"})
-    parsed = result_json(r)
-    check("record_count missing trait errors", "error" in parsed)
-
-    open(os.path.join(tmp, "traits", ".test.jsonl"), "w").write("")
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".test.jsonl", "fields": {"type": "note", "content": "hello"}})
-    parsed = result_json(r)
-    check("record_append succeeds", parsed.get("success") is True)
-    check("record_append returns modified", has_key(r, "modified"))
-    ts = parsed.get("timestamp", "")
-    check("record_append returns timestamp",
-          isinstance(ts, str) and len(ts) >= 20 and ts[4] == "-" and ts[10] == "T",
-          f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".test.jsonl", "fields": {"type": "obs", "content": "world"}})
-    parsed = result_json(r)
-    check("record_append second entry", parsed.get("success") is True)
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl"})
-    check("record_query shows all", "2/" in r["result"])
-
-    # --- record_query MongoDB-style filter: exact match ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": "note"}})
-    check("record_query filter exact match", "1/" in r["result"])
-    check("record_query filter content", "hello" in r["result"])
-
-    # --- record_query MongoDB-style filter: $eq ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": {"$eq": "note"}}})
-    check("record_query filter $eq", "1/" in r["result"])
-    check("record_query filter $eq content", "hello" in r["result"])
-
-    # --- record_query MongoDB-style filter: $in ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": {"$in": ["note", "obs"]}}})
-    check("record_query filter $in", "2/" in r["result"])
-
-    # --- record_query MongoDB-style filter: $regex ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"content": {"$regex": "hel"}}})
-    check("record_query filter $regex", "1/" in r["result"])
-
-    # --- record_query MongoDB-style filter: $not ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": {"$not": "obs"}}})
-    check("record_query filter $not", "1/" in r["result"])
-    check("record_query filter $not content", "hello" in r["result"])
-
-    # --- record_query MongoDB-style filter: $ne (alias for $not) ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": {"$ne": "obs"}}})
-    check("record_query filter $ne", "1/" in r["result"])
-
-    # --- record_query MongoDB-style filter: $nin ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": {"$nin": ["obs", "error"]}}})
-    check("record_query filter $nin", "1/" in r["result"])
-    check("record_query filter $nin content", "hello" in r["result"])
-
-    # --- record_query MongoDB-style filter: $lt/$gt (date range) ---
-
-    # get timestamps from records to test date filtering
-    lines = open(os.path.join(tmp, "traits", ".test.jsonl")).read().strip().splitlines()
-    first_ts = json.loads(lines[0])["timestamp"]
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"timestamp": {"$lte": first_ts}}})
-    check("record_query filter $lte on timestamp", "1/" in r["result"])
-
-    # --- record_query MongoDB-style filter: $or ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"$or": [
-                                                    {"type": "note"},
-                                                    {"content": "world"}
-                                                ]}})
-    check("record_query filter $or", "2/" in r["result"])
-
-    # --- record_query bad $regex ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"content": {"$regex": "[invalid"}}})
-    check("record_query bad $regex errors", "error" in r["result"].lower())
-
-    # --- record_query with limit/offset ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl", "limit": "1"})
-    check("record_query with limit", "1/2" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl", "limit": "1", "offset": "1"})
-    check("record_query with offset", "world" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl", "offset": "-1"})
-    check("record_query negative offset", "1/2" in r["result"])
-    check("record_query negative offset content", "world" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl", "offset": "-2", "limit": "1"})
-    check("record_query negative offset with limit", "1/2" in r["result"])
-    check("record_query negative offset with limit content", "hello" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl", "offset": "-1", "limit": "50"})
-    check("record_query negative offset overlimit", "1/2" in r["result"])
-    check("record_query negative offset overlimit content", "world" in r["result"])
-
-    # --- record_query filter multi-field (AND) ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": "note", "content": "hello"}})
-    check("record_query filter multi-field match", "1/" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "filter": {"type": "note", "content": "world"}})
-    check("record_query filter multi-field mismatch", "0/" in r["result"])
-
-    # --- record_query with fields param (array type) ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".test.jsonl",
-                                                "fields": ["type"]})
-    lines = r["result"].split("\n")[1:]
-    if lines and lines[0]:
-        record = json.loads(lines[0])
-        check("record_query fields includes type", "type" in record)
-        check("record_query fields excludes content", "content" not in record)
-
-    # --- record_query rejects non-.jsonl ---
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": "noext"})
-    check("record_query rejects non-.jsonl", "error" in r["result"].lower())
-
-    # --- record_count (absorbs record_fields) ---
-
-    r, _, _ = call_tool(hook, "record_count", {"trait": ".test.jsonl"})
-    parsed = result_json(r)
-    check("record_count returns structured count", parsed.get("count") == 2, f"got: {parsed}")
-    check("record_count returns field counts", "fields" in parsed)
-    check("record_count fields has timestamp", parsed["fields"].get("timestamp") == 2)
-    check("record_count fields has type", parsed["fields"].get("type") == 2)
-    check("record_count fields has content", parsed["fields"].get("content") == 2)
-
-    # record_count with specific field (unique value counts)
-    r, _, _ = call_tool(hook, "record_count", {"trait": ".test.jsonl", "field": "type"})
-    parsed = result_json(r)
-    check("record_count field returns count", parsed.get("count") == 2)
-    check("record_count field has field name", parsed.get("field") == "type")
-    check("record_count field has values", "values" in parsed)
-    check("record_count field note count", parsed["values"].get("note") == 1)
-    check("record_count field obs count", parsed["values"].get("obs") == 1)
-
-    # record_count with filter
-    r, _, _ = call_tool(hook, "record_count", {"trait": ".test.jsonl",
-                                                "filter": {"type": "obs"}})
-    parsed = result_json(r)
-    check("record_count with filter", parsed.get("count") == 1, f"got: {parsed}")
-
-    # record_count with missing field
-    r, _, _ = call_tool(hook, "record_count", {"trait": ".test.jsonl", "field": "nonexistent"})
-    parsed = result_json(r)
-    check("record_count missing field", parsed.get("count") == 2)
-    check("record_count missing field empty values", parsed.get("values") == {})
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": "noext"})
-    parsed = result_json(r)
-    check("record_append rejects non-.jsonl", "error" in parsed)
-
-    # --- nested object support ---
-
-    nested_jsonl = ".nested_test.jsonl"
-    r, _, _ = call_tool(hook, "record_append", {"trait": nested_jsonl,
-        "fields": {"type": "event", "meta": {"source": "web", "tags": ["a", "b"]}, "count": 42}})
-    parsed = result_json(r)
-    check("record_append nested object succeeds", parsed.get("success") is True, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": nested_jsonl,
-        "fields": {"type": "event", "meta": {"source": "api", "tags": ["c"]}, "count": 7}})
-    parsed = result_json(r)
-    check("record_append nested object second", parsed.get("success") is True)
-
-    # query all nested records
-    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl})
-    check("record_query nested shows all", "2/" in r["result"])
-
-    # exact filter on top-level string still works
-    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl,
-        "filter": {"type": "event"}})
-    check("record_query nested filter top-level", "2/" in r["result"])
-
-    # dot-path filter on nested field
-    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl,
-        "filter": {"meta.source": "web"}})
-    check("record_query dot-path filter", "1/" in r["result"])
-    check("record_query dot-path filter content", "web" in r["result"])
-
-    # dot-path filter with operator
-    r, _, _ = call_tool(hook, "record_query", {"trait": nested_jsonl,
-        "filter": {"meta.source": {"$in": ["web", "cli"]}}})
-    check("record_query dot-path $in", "1/" in r["result"])
-
-    # record_count with nested field grouping
-    r, _, _ = call_tool(hook, "record_count", {"trait": nested_jsonl, "field": "meta.source"})
-    parsed = json.loads(r["result"])
-    check("record_count dot-path field", parsed.get("count") == 2, f"got: {parsed}")
-    check("record_count dot-path values", parsed["values"].get("web") == 1)
-    check("record_count dot-path values api", parsed["values"].get("api") == 1)
-
-    # record_count grouping on non-string nested value uses json serialization
-    r, _, _ = call_tool(hook, "record_count", {"trait": nested_jsonl, "field": "meta"})
-    parsed = json.loads(r["result"])
-    check("record_count nested object grouping", parsed.get("count") == 2)
-    # values should be json-serialized keys (double quotes), not python str(dict) (single quotes)
-    for k in parsed.get("values", {}):
-        check("record_count nested grouping uses json not str", "'" not in k, f"got key: {k}")
-
-    os.remove(os.path.join(tmp, "traits", nested_jsonl))
-
-    # --- record_append: field normalization (LLM nesting mistakes) ---
-
-    norm_jsonl = ".norm_test.jsonl"
-    # $literal wrapper
-    r, _, _ = call_tool(hook, "record_append", {"trait": norm_jsonl,
-        "fields": {"type": {"$literal": "obs"}, "content": {"$literal": "hi"}}})
-    check("record_append unwraps $literal", result_json(r).get("success") is True)
-    rec = json.loads(open(os.path.join(tmp, "traits", norm_jsonl)).read().strip())
-    check("record_append $literal type unwrapped", rec.get("type") == "obs")
-    check("record_append $literal content unwrapped", rec.get("content") == "hi")
-
-    # single-key wrapping the whole record
-    os.remove(os.path.join(tmp, "traits", norm_jsonl))
-    r, _, _ = call_tool(hook, "record_append", {"trait": norm_jsonl,
-        "fields": {"content": {"type": "obs", "content": "hi"}}})
-    check("record_append unwraps single-key sibling nest", result_json(r).get("success") is True)
-    rec = json.loads(open(os.path.join(tmp, "traits", norm_jsonl)).read().strip())
-    check("record_append nested type unwrapped", rec.get("type") == "obs")
-    check("record_append nested content unwrapped", rec.get("content") == "hi")
-
-    os.remove(os.path.join(tmp, "traits", norm_jsonl))
-
-    os.remove(os.path.join(tmp, "traits", ".test.jsonl"))
-
-    # --- task_create + task_update + task_comment ---
-
-    open(os.path.join(tmp, "traits", ".tasks.json"), "w").write("{}")
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "test task"})
-    parsed = result_json(r)
-    check("task_create returns success", parsed.get("success") is True, f"got: {parsed}")
-    check("task_create returns id", "id" in parsed, f"got: {parsed}")
-    task_id = parsed["id"]
-    check("task_create uuid format", len(task_id) == 36 and task_id.count("-") == 4,
-          f"got: {task_id}")
-    check("task_create returns modified", has_key(r, "modified"))
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "due task", "status": "blocked",
-                                               "due": "2026-04-01T00:00:00+00:00"})
-    parsed = result_json(r)
-    check("task_create with due", parsed.get("success") is True)
-
-    # --- task_create with description ---
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "described task",
-                                               "description": "detailed info about this task"})
-    parsed = result_json(r)
-    check("task_create with description", parsed.get("success") is True)
-    desc_id = parsed["id"]
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_create stores description", data[desc_id].get("description") == "detailed info about this task")
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "no desc task"})
-    no_desc_id = result_json(r)["id"]
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_create without description omits key", "description" not in data[no_desc_id])
-
-    # --- task_create due validation ---
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "bad due", "due": "2026-04-01"})
-    parsed = result_json(r)
-    check("task_create rejects due without timezone", "error" in parsed, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "bad due", "due": "not-a-date"})
-    parsed = result_json(r)
-    check("task_create rejects invalid due", "error" in parsed, f"got: {parsed}")
-
-    # --- task_create interval validation ---
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "bad interval", "interval": "P1D"})
-    parsed = result_json(r)
-    check("task_create interval requires due", "error" in parsed, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "bad interval", "due": "2026-04-01T00:00:00+00:00",
-                                               "interval": "bad"})
-    parsed = result_json(r)
-    check("task_create rejects invalid interval", "error" in parsed, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "recurring task",
-                                               "due": "2026-04-01T09:00:00+00:00",
-                                               "interval": "P7D"})
-    parsed = result_json(r)
-    check("task_create with interval", parsed.get("success") is True)
-    recur_id = parsed["id"]
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_create stores interval", data[recur_id].get("interval") == "P7D")
-
-    # --- verify tasks via data_query (replaces task_read + task_list) ---
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
-                                              "filter": {"id": desc_id}})
-    parsed = result_json(r)
-    check("data_query task by id", desc_id in parsed)
-    check("data_query task has title", parsed[desc_id].get("title") == "described task")
-    check("data_query task has description", parsed[desc_id].get("description") == "detailed info about this task")
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
-                                              "filter": {"status": "open"}})
-    parsed = result_json(r)
-    check("data_query tasks filter status", len(parsed) >= 2)
-
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
-                                              "filter": {"status": "blocked"}})
-    parsed = result_json(r)
-    check("data_query tasks filter blocked", len(parsed) == 1)
-
-    # task_read via data_query with id filter for non-existent task
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
-                                              "filter": {"id": "nonexistent-uuid"}})
-    parsed = result_json(r)
-    check("data_query missing task returns empty", parsed == {}, f"got: {parsed}")
-
-    # task_list with fields via data_query
-    r, _, _ = call_tool(hook, "data_query", {"trait": ".tasks.json", "key": ".",
-                                              "fields": ["title", "status"]})
-    parsed = result_json(r)
-    first_val = list(parsed.values())[0]
-    check("data_query tasks fields includes title", "title" in first_val)
-    check("data_query tasks fields includes status", "status" in first_val)
-    check("data_query tasks fields excludes created", "created" not in first_val)
-
-    # clean up extra tasks for subsequent tests
-    call_tool(hook, "data_update", {"trait": ".tasks.json", "ops": {"$unset": {desc_id: "", no_desc_id: ""}}})
-
-    # --- task_update ---
-
-    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "status": "done"})
-    parsed = result_json(r)
-    check("task_update returns success", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_update status changed", data[task_id]["status"] == "done")
-    check("task_update has updated timestamp", "updated" in data[task_id])
-
-    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "due": "no-tz"})
-    parsed = result_json(r)
-    check("task_update rejects due without timezone", "error" in parsed, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "task_update", {"id": "nonexistent-uuid"})
-    parsed = result_json(r)
-    check("task_update not found returns error", "error" in parsed, f"got: {parsed}")
-
-    # --- task_update on recurring: NO recurring bump on status=done ---
-    # (this is a change from old behavior - recurring bump only happens via task_comment)
-
-    r, _, _ = call_tool(hook, "task_update", {"id": recur_id, "status": "done"})
-    parsed = result_json(r)
-    check("task_update recurring done returns success", parsed.get("success") is True, f"got: {parsed}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_update recurring sets done (no bump)", data[recur_id]["status"] == "done")
-    check("task_update recurring due unchanged", data[recur_id]["due"] == "2026-04-01T09:00:00+00:00",
-          f"got: {data[recur_id]['due']}")
-
-    # reset for comment tests
-    call_tool(hook, "task_update", {"id": recur_id, "status": "open"})
-
-    # --- task_update description ---
-
-    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "description": "added a description"})
-    parsed = result_json(r)
-    check("task_update description", parsed.get("success") is True)
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_update description stored", data[task_id].get("description") == "added a description")
-
-    # --- task_update add interval to existing ---
-
-    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "status": "open",
-                                               "due": "2026-05-01T00:00:00+00:00",
-                                               "interval": "P1M"})
-    parsed = result_json(r)
-    check("task_update add interval", parsed.get("success") is True)
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_update interval stored", data[task_id].get("interval") == "P1M")
-
-    r, _, _ = call_tool(hook, "task_update", {"id": task_id, "interval": "bad"})
-    parsed = result_json(r)
-    check("task_update rejects invalid interval", "error" in parsed, f"got: {parsed}")
-
-    # --- task deletion via data_update $unset (replaces task_delete) ---
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".tasks.json", "ops": {"$unset": {task_id: ""}}})
-    parsed = result_json(r)
-    check("data_update $unset task succeeds", parsed.get("success") is True)
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("data_update $unset task removed", task_id not in data)
-
-    r, _, _ = call_tool(hook, "data_update", {"trait": ".tasks.json", "ops": {"$unset": {"nonexistent-uuid": ""}}})
-    parsed = result_json(r)
-    check("data_update $unset missing task returns error", "error" in parsed)
-
-    # --- task_comment ---
-
-    # create a fresh task for comment tests
-    r, _, _ = call_tool(hook, "task_create", {"title": "commentable task"})
-    comment_task_id = result_json(r)["id"]
-
-    r, _, _ = call_tool(hook, "task_comment", {"id": comment_task_id, "text": "first update"})
-    parsed = result_json(r)
-    check("task_comment returns success", parsed.get("success") is True, f"got: {parsed}")
-    check("task_comment returns modified", has_key(r, "modified"))
-
-    # verify comment stored in .tasks_comments.jsonl
-    comments_path = os.path.join(tmp, "traits", ".tasks_comments.jsonl")
-    lines = open(comments_path).read().strip().splitlines()
-    check("task_comment creates jsonl entry", len(lines) == 1)
-    entry = json.loads(lines[0])
-    check("task_comment has task_id", entry.get("task_id") == comment_task_id)
-    check("task_comment has text", entry.get("text") == "first update")
-    check("task_comment has timestamp", "timestamp" in entry)
-
-    # add second comment
-    r, _, _ = call_tool(hook, "task_comment", {"id": comment_task_id, "text": "second update"})
-    parsed = result_json(r)
-    check("task_comment second succeeds", parsed.get("success") is True)
-    lines = open(comments_path).read().strip().splitlines()
-    check("task_comment appends", len(lines) == 2)
-
-    # task_comment updates the task's updated timestamp
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_comment updates task timestamp", "updated" in data[comment_task_id])
-
-    # task_comment requires text
-    r, _, _ = call_tool(hook, "task_comment", {"id": comment_task_id})
-    parsed = result_json(r)
-    check("task_comment requires text", "error" in parsed, f"got: {parsed}")
-
-    # task_comment validates task exists
-    r, _, _ = call_tool(hook, "task_comment", {"id": "nonexistent-uuid", "text": "orphan"})
-    parsed = result_json(r)
-    check("task_comment rejects missing task", "error" in parsed, f"got: {parsed}")
-
-    # comments filterable via record_query
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".tasks_comments.jsonl",
-                                                "filter": {"task_id": comment_task_id}})
-    check("record_query filter finds task comments", "2/2 records" in r["result"])
-
-    # filter with non-matching value returns empty
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".tasks_comments.jsonl",
-                                                "filter": {"task_id": "nonexistent"}})
-    check("record_query filter no match", "0/0 records" in r["result"])
-
-    # --- task_comment on recurring task bumps due ---
-
-    r, _, _ = call_tool(hook, "task_create", {"title": "recurring commentable",
-                                               "due": "2026-04-01T09:00:00+00:00",
-                                               "interval": "P7D"})
-    recur_comment_id = result_json(r)["id"]
-
-    r, _, _ = call_tool(hook, "task_comment", {"id": recur_comment_id, "text": "weekly check-in"})
-    parsed = result_json(r)
-    check("task_comment recurring returns success", parsed.get("success") is True)
-    check("task_comment recurring returns due", "due" in parsed, f"got: {parsed}")
-    check("task_comment recurring due value", parsed.get("due") == "2026-04-08T09:00:00.000+00:00",
-          f"got: {parsed.get('due')}")
-    data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task_comment recurring due bumped in file", data[recur_comment_id]["due"] == "2026-04-08T09:00:00.000+00:00",
-          f"got: {data[recur_comment_id]['due']}")
-    check("task_comment recurring stays open", data[recur_comment_id]["status"] == "open")
-
-    # cleanup
-    call_tool(hook, "data_update", {"trait": ".tasks.json",
-                                    "ops": {"$unset": {comment_task_id: "", recur_comment_id: ""}}})
-
-    os.remove(os.path.join(tmp, "traits", ".tasks.json"))
-    if os.path.exists(comments_path):
-        os.remove(comments_path)
-
-    # --- journal via record tools (no dedicated journal tools) ---
-
-    open(os.path.join(tmp, "traits", ".journal.jsonl"), "w").write("")
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".journal.jsonl",
-                                                 "fields": {"type": "thought", "content": "i exist"}})
-    parsed = result_json(r)
-    check("journal via record_append succeeds", parsed.get("success") is True)
-    check("journal via record_append returns modified", has_key(r, "modified"))
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".journal.jsonl",
-                                                 "fields": {"type": "obs", "content": "humans sleep"}})
-
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".journal.jsonl",
-                                                 "fields": {"type": "event", "content": "auth broke",
-                                                            "severity": "high", "tags": "auth,prod"}})
-    lines = open(os.path.join(tmp, "traits", ".journal.jsonl")).read().strip().splitlines()
-    entry = json.loads(lines[-1])
-    check("journal entry has severity", entry.get("severity") == "high")
-    check("journal entry has tags", entry.get("tags") == "auth,prod")
-    check("journal entry has timestamp", "timestamp" in entry)
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".journal.jsonl"})
-    check("journal record_query shows all", "3/" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".journal.jsonl",
-                                                "filter": {"type": "thought"}})
-    check("journal record_query filter type", "1/" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_query", {"trait": ".journal.jsonl",
-                                                "filter": {"content": {"$regex": "exist"}}})
-    check("journal record_query $regex", "1/" in r["result"])
-
-    r, _, _ = call_tool(hook, "record_count", {"trait": ".journal.jsonl"})
-    parsed = result_json(r)
-    check("journal record_count total", parsed.get("count") == 3, f"got: {parsed}")
-
-    r, _, _ = call_tool(hook, "record_count", {"trait": ".journal.jsonl", "field": "type"})
-    parsed = result_json(r)
-    check("journal record_count field type", parsed["values"].get("thought") == 1)
-    check("journal record_count field obs", parsed["values"].get("obs") == 1)
-
-    os.remove(os.path.join(tmp, "traits", ".journal.jsonl"))
-
-    # --- discover final tool list ---
-
-    r, _, _ = call_hook(hook, "discover")
-    names = sorted(t["name"] for t in r["tools"])
-    expected_names = sorted([
-        "trait_list", "trait_read", "trait_write", "trait_edit", "trait_append", "trait_delete", "trait_move",
-        "data_query", "data_update", "data_count",
-        "record_append", "record_query", "record_count",
-        "task_create", "task_update", "task_comment",
-        "prompt_list", "prompt_read", "prompt_write",
-        "datetime",
+    return result, logs
+
+
+def call_tool(name, args, memory):
+    result, _ = call_hook("execute_tool", {"tool": name, "args": args}, memory=memory)
+    raw = result.get("result", "")
+    try:
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return raw
+
+
+def a_store():
+    return FakeMemory(entries=[
+        {"path": "prompts/preamble.md", "visibility": "listed", "content": "you are per.\n"},
+        {"path": "prompts/chat.md", "visibility": "listed", "content": "be brief.\n"},
+        {"path": "prompts/heartbeat.md", "visibility": "listed", "content": "look around.\n"},
+        {"path": "traits/SOUL.md", "visibility": "core", "content": "curious"},
+        {"path": "traits/USER.md", "visibility": "core", "content": "prefers ascii"},
+        {"path": "traits/federation.md", "visibility": "listed", "content": "long prose"},
     ])
-    check("discover final tool list matches", names == expected_names,
-          f"expected: {expected_names}\ngot: {names}")
 
-    # --- discover typed params ---
 
-    tools_by_name = {t["name"]: t for t in r["tools"]}
-    ops_param = tools_by_name["data_update"]["parameters"].get("ops", {})
-    check("data_update ops param is object-typed", isinstance(ops_param, dict) and ops_param.get("type") == "object",
-          f"got: {ops_param}")
+def main():
+    # --- composition: what a system prompt is made of -----------------------------------------
+    mem = a_store()
+    try:
+        result, _ = call_hook("mutate_request", memory=mem.url)
+        system = "".join(result.get("system") or [])
+        check("the preamble and the mode's prompt both reach the system prompt",
+              "you are per." in system and "be brief." in system, system[:200])
+        check("a core trait is inlined, by name and content",
+              "{trait:SOUL.md}" in system and "curious" in system, system[:200])
+        check("a listed trait is NAMED but not inlined",
+              "federation.md" in system and "long prose" not in system, system[:300])
+        check("and the prompt says how to read one, in the tool that now serves it",
+              "memory_read on traits/<name>" in system, system[-200:])
+        # PERSONA OWNS THE SYSTEM PROMPT, so it replaces rather than appends -- an append would
+        # leave the backend's own default in front of the soul.
+        check("the result REPLACES the backend default", result.get("system_mode") == "replace")
+        check("composition costs two round trips, not one per file",
+              len(mem.calls("GET")) == 2, str(mem.calls("GET")))
+    finally:
+        mem.close()
 
-    # --- datetime format consistency ---
-    # all timestamps must use the datetime tool's canonical format: YYYY-MM-DDTHH:MM:SS.sss+HH:MM
+    # --- composition when the store is unreachable ---------------------------------------------
+    result, _ = call_hook("mutate_request", memory="http://127.0.0.1:1")
+    system = "".join(result.get("system") or [])
+    # A SESSION WITH NO SOUL MUST SAY SO. returning nothing would leave the backend default in
+    # place, which reads as persona simply not being loaded.
+    check("an unreachable store degrades VISIBLY rather than silently",
+          "degraded" in system and result.get("system_mode") == "replace", system[:200])
 
-    import re as re_mod
-    DT_RE = re_mod.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$")
+    # --- the heartbeat stage ------------------------------------------------------------------
+    mem = a_store()
+    try:
+        result, _ = call_hook("heartbeat", memory=mem.url)
+        check("the heartbeat carries its own prompt as the user turn",
+              result.get("user", "").strip() == "look around.", str(result.get("user")))
+        check("and composes the soul beside it",
+              "curious" in "".join(result.get("system") or []))
+    finally:
+        mem.close()
 
-    # format_iso produces canonical format
-    from datetime import datetime as dt_cls, timezone as tz_cls
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hooks"))
-    from persona import format_iso
-    now_fmt = format_iso(dt_cls.now(tz_cls.utc))
-    check("format_iso uses offset not Z", now_fmt.endswith("+00:00"), f"got: {now_fmt}")
-    check("format_iso matches canonical pattern", bool(DT_RE.match(now_fmt)), f"got: {now_fmt}")
+    mem = FakeMemory(entries=[])
+    try:
+        result, _ = call_hook("heartbeat", memory=mem.url)
+        check("no heartbeat prompt means no beat, not an empty one", result == {}, str(result))
+    finally:
+        mem.close()
 
-    # the persona_datetime tool returns the current time in the same canonical format
-    r, _, _ = call_tool(hook, "datetime", {})
-    check("datetime tool returns canonical ISO", bool(DT_RE.match(r.get("result", ""))), f"got: {r}")
-    check("datetime tool uses +00:00 offset", r.get("result", "").endswith("+00:00"), f"got: {r}")
+    # --- tasks: persona's schema over memory's shapes ------------------------------------------
+    mem = a_store()
+    try:
+        got = call_tool("task_create", {"title": "water the plants"}, mem.url)
+        patches = mem.calls("PATCH")
+        check("creating a task returns its id", isinstance(got, dict) and "id" in got, str(got))
+        # ONE `$set` ON THE TASK'S OWN KEY. rewriting the whole document would make two creations
+        # racing lose one another, which is what the per-entry shape exists to prevent.
+        ops = patches[0][2]["$set"] if patches else {}
+        check("and writes ONE key of the tasks document",
+              len(patches) == 1 and list(ops) == [got.get("id")], str(patches))
+        check("it never reads the other tasks in order to write one",
+              not any(c[1].endswith(".tasks.json") for c in mem.calls("GET")),
+              str(mem.calls("GET")))
 
-    # format_iso with non-UTC input still outputs +00:00
-    from datetime import timedelta as td_cls
-    est = tz_cls(td_cls(hours=-5))
-    est_fmt = format_iso(dt_cls(2026, 4, 1, 12, 0, 0, tzinfo=est))
-    check("format_iso converts to UTC offset", est_fmt == "2026-04-01T17:00:00.000+00:00", f"got: {est_fmt}")
+        task_id = got["id"]
+        mem.docs["traits/.tasks.json"] = {task_id: {"title": "water the plants", "status": "open"}}
+        mem.log.clear()
+        call_tool("task_update", {"id": task_id, "status": "blocked"}, mem.url)
+        ops = mem.calls("PATCH")[0][2]["$set"]
+        # SET ONLY WHAT CHANGED, by dot-path: writing the whole task back would put every field it
+        # read back with it, so two edits in flight would each undo the other's.
+        check("updating a task sets only the fields that changed",
+              set(ops) == {f"{task_id}.status", f"{task_id}.updated"}, str(ops))
 
-    # record_append timestamps use canonical format
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".dt_test.jsonl", "fields": {"v": "1"}})
-    dt_line = open(os.path.join(tmp, "traits", ".dt_test.jsonl")).read().strip()
-    dt_entry = json.loads(dt_line)
-    check("record timestamp uses offset format", bool(DT_RE.match(dt_entry["timestamp"])),
-          f"got: {dt_entry['timestamp']}")
-    check("record timestamp ends with +00:00", dt_entry["timestamp"].endswith("+00:00"),
-          f"got: {dt_entry['timestamp']}")
-    os.remove(os.path.join(tmp, "traits", ".dt_test.jsonl"))
+        got = call_tool("task_update", {"id": "no-such-task", "status": "open"}, mem.url)
+        check("updating a task that does not exist says so",
+              isinstance(got, dict) and "not found" in got.get("error", ""), str(got))
+    finally:
+        mem.close()
 
-    # task_create timestamps use canonical format
-    open(os.path.join(tmp, "traits", ".tasks.json"), "w").write("{}")
-    r, _, _ = call_tool(hook, "task_create", {"title": "dt format check"})
-    tid = result_json(r)["id"]
-    tasks_data = json.loads(open(os.path.join(tmp, "traits", ".tasks.json")).read())
-    check("task created timestamp canonical", bool(DT_RE.match(tasks_data[tid]["created"])),
-          f"got: {tasks_data[tid]['created']}")
-    check("task updated timestamp canonical", bool(DT_RE.match(tasks_data[tid]["updated"])),
-          f"got: {tasks_data[tid]['updated']}")
-    os.remove(os.path.join(tmp, "traits", ".tasks.json"))
+    mem = a_store()
+    try:
+        got = call_tool("task_create", {"title": "weekly", "interval": "P1W"}, mem.url)
+        check("a recurrence with no due date is refused",
+              isinstance(got, dict) and "interval requires a due date" in got.get("error", ""),
+              str(got))
+    finally:
+        mem.close()
 
-    # journal timestamps use canonical format (via record_append)
-    open(os.path.join(tmp, "traits", ".journal.jsonl"), "w").write("")
-    r, _, _ = call_tool(hook, "record_append", {"trait": ".journal.jsonl",
-                                                 "fields": {"type": "test", "content": "dt check"}})
-    j_line = open(os.path.join(tmp, "traits", ".journal.jsonl")).read().strip()
-    j_entry = json.loads(j_line)
-    check("journal timestamp uses offset format", bool(DT_RE.match(j_entry["timestamp"])),
-          f"got: {j_entry['timestamp']}")
-    os.remove(os.path.join(tmp, "traits", ".journal.jsonl"))
+    # --- the ordering that has no transaction to protect it ------------------------------------
+    mem = a_store()
+    try:
+        task_id = "t-1"
+        mem.docs["traits/.tasks.json"] = {
+            task_id: {"title": "weekly", "status": "open", "interval": "P1W",
+                      "due": "2026-01-01T09:00:00.000+00:00"}}
+        got = call_tool("task_comment", {"id": task_id, "text": "did it"}, mem.url)
+        check("commenting on a recurring task bumps its due date by the interval",
+              got.get("due") == "2026-01-08T09:00:00.000+00:00", str(got))
+        writes = [c for c in mem.log if c[0] in ("POST", "PATCH")]
+        # THE ORDER IS LOAD-BEARING AND THERE IS NO TRANSACTION ACROSS TWO FILES. a crash between
+        # them must leave a comment against a stale due date -- visible and self-correcting -- and
+        # never a bumped task with no record of why, which is invisible.
+        check("the comment is appended BEFORE the due date moves",
+              [w[0] for w in writes] == ["POST", "PATCH"], str(writes))
+        check("and the comment carries the task it is about",
+              writes[0][2]["fields"]["task_id"] == task_id, str(writes[0]))
+    finally:
+        mem.close()
 
-    # ISO_DT_DESC references offset format not Z
-    from persona import ISO_DT_DESC
-    check("ISO_DT_DESC uses offset example", "+00:00" in ISO_DT_DESC, f"got: {ISO_DT_DESC}")
-    check("ISO_DT_DESC does not use Z example", "000Z" not in ISO_DT_DESC, f"got: {ISO_DT_DESC}")
+    # --- prompts round-trip through the endpoint -----------------------------------------------
+    mem = a_store()
+    try:
+        call_tool("prompt_write", {"prompt": "chat.md", "content": "be briefer."}, mem.url)
+        check("writing a prompt PUTs it under prompts/",
+              mem.calls("PUT") and mem.calls("PUT")[0][1] == "prompts/chat.md",
+              str(mem.calls("PUT")))
+        got = call_tool("prompt_read", {"prompt": "chat.md"}, mem.url)
+        check("and reading it back gives what was written", got == "be briefer.", str(got))
+        listed = call_tool("prompt_list", {}, mem.url)
+        check("listing names the prompt files", "chat.md" in str(listed), str(listed))
+    finally:
+        mem.close()
 
-    # --- prompt size tracking ---
+    # --- the tool surface ----------------------------------------------------------------------
+    mem = a_store()
+    try:
+        result, _ = call_hook("discover", memory=mem.url)
+        names = {t["name"] for t in result.get("tools", [])}
+        check("discover declares persona's remaining tools",
+              {"task_create", "task_update", "task_comment", "prompt_read", "datetime"} <= names,
+              str(sorted(names)))
+        # THE MIGRATION'S REGRESSION GUARD. these moved to the memory face; a copy left behind here
+        # would be a second implementation of the thing the move existed to have one of.
+        gone = {n for n in names if n.startswith(("trait_", "data_", "record_"))}
+        check("and NO storage tool survived the move to the memory face", not gone, str(gone))
+        gated = {t["name"] for t in result.get("tools", []) if t.get("permission")}
+        check("the mutating task tools still carry their permission arg",
+              {"task_update", "task_comment"} <= gated, str(sorted(gated)))
+    finally:
+        mem.close()
 
-    from persona import system_prompt as sp_fn, tool_defs as td_fn
-    prompts = load_prompts(tmp)
-    sp_text = "\n".join(sp_fn(prompts, "chat"))
-    td_text = json.dumps(td_fn())
-    td_count = len(td_fn())
-    print(f"\nprompt: {len(sp_text)} chars, tools: {len(td_text)} chars ({td_count}), total: {len(sp_text) + len(td_text)} chars")
+    # --- the clock -----------------------------------------------------------------------------
+    got = call_tool("datetime", {}, "http://127.0.0.1:1")
+    check("the datetime tool answers in canonical ISO 8601 UTC, with no store involved",
+          isinstance(got, str) and got.endswith("+00:00") and got[4] == "-", str(got))
 
-finally:
-    shutil.rmtree(tmp)
+    print(f"\n{PASS + FAIL} tests, {PASS} passed, {FAIL} failed")
+    return 1 if FAIL else 0
 
-# --- summary ---
 
-total = PASS + FAIL
-print(f"\n{total} tests, {PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+if __name__ == "__main__":
+    sys.exit(main())

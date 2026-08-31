@@ -3,5 +3,4 @@ persona.env
 models.json
 __pycache__/
 hmux/config.local.toml
-work/
-data/
+/volumes
