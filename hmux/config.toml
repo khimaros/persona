@@ -18,19 +18,9 @@ single_user = true
 single_user_name = "human"
 single_user_display_name = "Human"
 
-# the workspace face keeps /work -- the traits, prompts, hooks and tests -- and is the ONE thing
-# that versions it. it is named for the DIRECTORY because that is what it owns. everything reaches
-# it over `spoke.call`, and bulk over http. IT COMES FIRST so it is up before anything that calls
-# it, and it is the SOLE WRITER of that directory, which is what lets it commit every change and
-# lets its change feed be complete.
 [[profile.persona.spokes]]
 kind = "workspace"
 
-# and the traits face on top of it: `traits/` is the only part of /work that is MEMORY, and this is
-# the only door to it a model has. It owns no bytes -- every read and write goes to the workspace
-# face -- and what it adds is the part that is about traits: a scope that is a face's root rather
-# than a prefix a caller remembers, the visibility rule that decides a system prompt, and a change
-# feed scoped to traits so `hcp` subscribes instead of filtering.
 [[profile.persona.spokes]]
 kind = "traits"
 
@@ -43,26 +33,9 @@ kind = "chat"
 [[profile.persona.spokes]]
 kind = "omni"
 
-# the voice-note client. LIKE TOUCH, IT SERVES A BROWSER BUNDLE AND NOTHING ELSE -- the release
-# itself is three ordinary calls the page makes as a spoke (upload over the workspace http mount,
-# `voice.transcribe`, then two appends), so there is no ramble-specific tool for the model and
-# nothing here registers one.
-#
-# THE NOTES IT WRITES ARE READ WITH THE TOOLS THAT ALREADY EXIST: `traits/.notes.jsonl` and
-# `traits/.sensors.jsonl`, joined by the note's ULID. Both are dot-prefixed, which hides them from
-# the trait LISTING and from nothing else -- a record query reads them exactly as before.
 [[profile.persona.spokes]]
 kind = "ramble"
 
-# the touch DISPLAY. it serves the browser bundle and nothing else: the room's tools are
-# registered by whatever is LOOKING at the room -- a phone or this page -- and vanish with the last
-# one, which is the whole of "the tools should only be available when there is an active human
-# touch session".
-#
-# THE ROOM KEEPER IS NOT RUN HERE, and that is the default since hmux phase 84e. Add
-# `persistent_tools = true` if you want the room usable with NO display attached -- a wall display
-# powered off overnight, or an agent arranging the room before anybody arrives. It costs a process
-# and it makes the tools exist with nobody there, which is why it is a choice.
 [[profile.persona.spokes]]
 kind = "touch"
 
@@ -91,10 +64,6 @@ bridge = { agent = "per", default_trigger = "mention", cleanup = "compact", clea
 [[profile.persona.spokes]]
 kind = "federation"
 [profile.persona.spokes.federation]
-# no `name` here on purpose: the face inherits `[profile.persona] name`, so the network identity
-# and the name the admin renders over the agent's own messages are one value. Setting it here
-# again wins over the profile (a face that names itself keeps its own) and is how they drifted --
-# this said "per" while the profile said "perseus".
 substrates = ["veilid", "https"]
 tools = "manage"
 verify = "tofu"
@@ -102,22 +71,8 @@ verify = "tofu"
 [[profile.persona.spokes]]
 kind = "permission"
 #tools = true
-[profile.persona.spokes.permission]
-default = "deny"
 [profile.persona.spokes.permission.tools]
-# THE MODEL REACHES TRAITS THROUGH `trait_*`, AND THE WORKSPACE NOT AT ALL (phase 82).
-# `workspace_*` addresses the WHOLE tree -- every prompt, every hook, `state/`, `media/` -- which
-# is a real capability another deployment wants and this one declines. Every `trait_*` argument is
-# a trait NAME and the face puts the directory on, so there is no argument that reaches another one.
-#
-# `disable` RATHER THAN `deny`, WHICH IS THE DIFFERENCE THIS DEPLOYMENT CARES ABOUT: a denied tool
-# is still ADVERTISED -- it costs tokens in every request and reads to a model as something to
-# attempt and be refused. Disabled, it is not offered at all.
-"workspace_*"          = "disable"
-# THE QUERY ENGINE STAYS, and this was nearly got wrong: `persona_task_*` creates and amends tasks
-# but does not LIST or DELETE them, and the journal has no wrapper at all. Disabling `trait_data_*`
-# would have left the agent unable to read its own task list -- silently, since a disabled tool is
-# not offered and so is never refused out loud.
+"*"                    = "disable"
 "trait_*"              = "allow"
 "bridge_*"             = "allow"
 "hcp_*"                = "allow"
@@ -133,31 +88,20 @@ default = "deny"
 "federation_unpair"    = "ask"
 "hcp_hook_write"       = "ask"
 "hcp_hook_edit"        = "ask"
-# and no `persona_prompt_edit` rule: the hook serves list/read/write only, and a rule naming a tool
-# that does not exist matches nothing -- which reads as a gate and is a silence.
 "persona_prompt_write" = "ask"
-"glob"  = "allow"
-"grep"  = "allow"
-"find" = "allow"
-"ls" = "allow"
+"glob"                 = "allow"
+"grep"                 = "allow"
+"find"                 = "allow"
+"ls"                   = "allow"
 [profile.persona.spokes.permission.tools.read]
 "*" = "deny"
 "/work/config/*" = "allow"
 "/work/tests/*" = "allow"
 "~/.pi/agent/**" = "allow"
 "/tmp/pi-output/**" = "allow"
-# EVERY TOOL THAT CAN CHANGE SOUL.md, and the rule is keyed on the ARGUMENT the tool takes.
-#
-# THE TOOLS TAKE A TRAIT NAME, NOT A STORE PATH -- `SOUL.md`, because the directory is the face's
-# and not the model's to choose. That is the whole reason they scope: there is no `traits/` in the
-# argument because there is nowhere else it could go. A rule keyed on `traits/SOUL.md` would not
-# match, and a permission rule that does not match FAILS OPEN -- the gate is simply absent and
-# looks exactly like a policy nobody wrote.
 [profile.persona.spokes.permission.tools.trait_write]
 "*" = "allow"
 "SOUL.md" = "ask"
-# APPEND IS THE SAFE WRITE and is left open even on SOUL.md: it cannot destroy what is there, where
-# `write` replaces the file and `edit` can match the wrong run of text.
 [profile.persona.spokes.permission.tools.trait_append]
 "*" = "allow"
 [profile.persona.spokes.permission.tools.trait_edit]
@@ -204,5 +148,5 @@ default = "deny"
 "/work/**" = "allow"
 "~/.pi/agent/**" = "allow"
 "/tmp/pi-output/**" = "allow"
-[profile.persona.spokes.permission.identity.federation]
-default = "deny"
+[profile.persona.spokes.permission.identity.federation.tools]
+"*" = "disable"
