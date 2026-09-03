@@ -14,21 +14,23 @@ that globs `WORKSPACE/traits` breaks the day it moves. reading through the endpo
 memory's business and nobody else's. it also deletes the second copy of the visibility rule:
 ALLCAPS-inlines / lowercase-is-listed / .dotted-is-hidden is memory's now, and a listing reports it.
 
-the endpoint arrives in each stage's payload as `host.memory`, beside the `cwd` that was always
-there.
+AND IT HAS NO I/O AT ALL ANY MORE (hmux phase 76f). `urllib` went with the storage engine's
+transport; `socket` never arrived. What replaced them is the pipes this process already owns: hcp
+holds stdin open for a hook that asked for it at `discover`, so a question is a line out and an
+answer is a line back. There is no url, no port, no timeout of our own and no http status to map --
+the hook is a pure function from a payload to a result, with `_call` as its only edge.
+
+WHICH ALSO MEANS THE STORE IS NOT ADDRESSED BY LOCATION. `host.memory` was an endpoint this file had
+to be TOLD; now it names the `memory` KIND and the hub routes. A deployment that moves the face
+needs no change here, and one that has no face gets the hub's own refusal rather than a connection
+error.
 """
 
-import json, os, re, sys, urllib.error, urllib.parse, urllib.request, uuid
+import json, os, re, sys, uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, TypedDict, get_type_hints
 
-# where the store is, learned from each hook's payload (`host.memory`). the env var is the manual
-# fallback: running a stage by hand, and the contract test, which has no host to be told by.
-MEMORY = os.environ.get("HMUX_MEMORY", "")
-# how long to wait on it. WELL INSIDE the host's 30s hook cap, so a wedged memory face costs a
-# stage a moment and reports a sentence, rather than the whole budget and a timeout that reads
-# like a hang.
-MEMORY_TIMEOUT = 5
+
 
 # the two directories persona knows by name. everything else about the layout is memory's.
 TRAITS = "traits"
@@ -36,8 +38,14 @@ PROMPTS = "prompts"
 AVATAR = "🌀"
 ISO_DT_DESC = "ISO 8601 datetime with timezone offset (e.g. 2026-04-01T09:00:00.000+00:00)"
 ISO_DUR_DESC = "ISO 8601 duration (e.g. P1D, P1W, P1M, P1Y, PT1H, PT30M)"
-TASKS_TRAIT = f"{TRAITS}/.tasks.json"
-TASK_COMMENTS_TRAIT = f"{TRAITS}/.tasks_comments.jsonl"
+# THE TASK DOCUMENTS ARE TRAIT NAMES, NOT PATHS (phase 82): the traits face owns the directory, and
+# a `.dotted` name is the owning spoke's to address and not the model's -- which is what keeps a
+# model out of them without a rule anybody has to write.
+TASKS_TRAIT = ".tasks.json"
+TASK_COMMENTS_TRAIT = ".tasks_comments.jsonl"
+
+# the traits face's composition method, and the only one this hook calls by a dotted name.
+INDEX = "traits.index"
 TASK_STATUSES = ["open", "in_progress", "blocked", "closed", "wontfix"]
 
 class HookResult(TypedDict, total=False):
@@ -93,109 +101,108 @@ def result_err(msg):
     """structured error response."""
     return json.dumps({"error": msg})
 
-# --- the memory endpoint ---
+# --- the duplex channel: this hook's only edge ---
 
 class MemoryError(Exception):
     """the store could not answer. carries a sentence a model can act on."""
 
-def _mem(method, path="", body=None, **query):
-    """one request to the memory face.
+# correlates a question with its answer. hcp echoes the id back, and a hook that asked twice must
+# not read the first answer as the second's.
+_ASKED = [0]
 
-    RAISES RATHER THAN RETURNING A SENTINEL, so a caller cannot mistake "the store is down" for
-    "the file is empty" -- which is the difference between an error worth retrying and a system
-    prompt composed from nothing.
+def _call(kind, method, **args):
+    """ask a spoke a question, over the pipes hcp is already holding open (hmux phase 76e).
+
+    TEN LINES, AND NO TRANSPORT. what this replaced built a url, encoded a query string, chose a
+    content type, mapped an http status onto an exception and carried its own timeout -- forty
+    lines of transport for a process that already had a channel to its host.
+
+    RAISES RATHER THAN RETURNING A SENTINEL, which is the one thing worth keeping from that: a
+    caller must not mistake "the store is down" for "the file is empty", because those are the
+    difference between an error worth retrying and a system prompt composed from nothing.
     """
-    if not MEMORY:
-        raise MemoryError("no memory face is configured for this deployment")
-    url = f"{MEMORY.rstrip('/')}/t"
-    if path:
-        url += "/" + path.lstrip("/")
-    if query:
-        clean = {k: v for k, v in query.items() if v not in (None, "")}
-        if clean:
-            url += "?" + urllib.parse.urlencode(clean)
-    data = None
-    if body is not None:
-        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method=method)
-    if data is not None:
-        ctype = "application/octet-stream" if isinstance(body, str) else "application/json"
-        req.add_header("content-type", ctype)
+    _ASKED[0] += 1
+    asked = str(_ASKED[0])
+    print(json.dumps({"id": asked, "call": {"kind": kind, "method": method, "args": args}}),
+          flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        raise MemoryError("the host closed the channel before answering")
     try:
-        with urllib.request.urlopen(req, timeout=MEMORY_TIMEOUT) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = json.loads(e.read()).get("error", "")
-        except Exception:  # noqa: BLE001
-            pass
-        raise MemoryError(detail or f"memory: http {e.code}") from e
-    except Exception as e:  # noqa: BLE001
-        raise MemoryError(f"memory: {e}") from e
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
+        answer = json.loads(line)
     except json.JSONDecodeError:
-        return raw.decode("utf-8", "replace")
+        raise MemoryError(f"the host answered something that is not json: {line[:200]!r}") from None
+    if answer.get("id") != asked:
+        raise MemoryError(f"answer {answer.get('id')!r} does not match question {asked!r}")
+    if answer.get("error"):
+        raise MemoryError(answer["error"])
+    return answer.get("result")
 
-def _index(content=None):
-    """every path memory holds, with its visibility and revision.
+def _mem(method, **args):
+    """one WORKSPACE method: the directory, which is prompts and hooks and tests as well.
 
-    ONE ROUND TRIP FOR A WHOLE SYSTEM PROMPT when `content=core`: the bytes of the shouting files
-    come back inline and everything else is named. that endpoint parameter exists for this caller.
+    THIS HOOK USES IT FOR `prompts/` AND NOTHING ELSE (phase 82). traits go through `_traits`, which
+    is a face whose every argument is a trait NAME -- so the scope is structural rather than a
+    prefix this file remembers to put on.
     """
-    got = _mem("GET", "", content=content) or {}
-    return got.get("entries", [])
+    return _call("workspace", method, **args)
+
+def _traits(method, **args):
+    """one TRAITS method. the face puts `traits/` on for us and refuses anything that leaves it."""
+    return _call("traits", method, **args)
 
 # --- prompt + trait composition (persona's actual job) ---
 
-def _named(entries, prefix, suffix=""):
-    """the entries under `prefix/`, as {short name: entry}."""
+def _prompts():
+    """every prompt file with its bytes, in one round trip.
+
+    A PREFIX AND NOT A VISIBILITY (phase 82). this used to ask for `content=listed` and get the
+    prompts because they happened to be lowercase -- which is how a rule about which TRAITS a system
+    prompt inlines ended up deciding whether a PROMPT was readable.
+    """
+    got = _mem("workspace.list", prefix=f"{PROMPTS}/", content=True) or {}
     out = {}
-    for e in entries:
-        p = e.get("path", "")
-        if p.startswith(f"{prefix}/") and p.endswith(suffix):
-            out[p[len(prefix) + 1 : len(p) - len(suffix) if suffix else len(p)]] = e
+    for e in got.get("entries", []):
+        name = e.get("path", "")[len(PROMPTS) + 1 :]
+        if name.endswith(".md"):
+            out[name[: -len(".md")]] = e.get("content") or ""
     return out
 
 def system_prompt(mode=None):
-    """compose the system prompt: preamble, the mode's own prompt, then every core trait.
+    """compose the system prompt: preamble, the mode's own prompt, then every inlined trait.
 
     THE ORDER AND THE BYTES MUST NOT WANDER between runs -- the host freezes this per session for
     the provider's prompt cache, and a set that reordered itself would invalidate it every time.
-    memory lists in sorted order, so this does too by construction rather than by sorting again.
+    `traits.index` answers in sorted order, so this does too by construction rather than by sorting
+    again.
+
+    WHICH TRAITS ARE INLINED IS NOT THIS FILE'S QUESTION ANY MORE (82c). it asks the traits face and
+    is handed the answer, where before it read a visibility off a listing -- the second copy of a
+    rule, in the shape of a field.
     """
-    core_index = _index(content="core")
-    # the prompt files are `listed`, not `core`, so their bytes are not in the first answer. one
-    # more call brings all of them at once rather than one call per file.
-    prompts = {n: (e.get("content") or "") for n, e in
-               _named(_index(content="listed"), PROMPTS, ".md").items()}
+    prompts = _prompts()
+    index = _traits(INDEX) or {}
     parts = [prompts.get("preamble", "")]
     if mode:
         parts.append(prompts.get(mode, ""))
-    core, listed = [], []
-    for name, e in _named(core_index, TRAITS).items():
-        if e.get("visibility") == "core":
-            core.append(f"\n{{trait:{name}}}\n{e.get('content') or '(empty)'}\n")
-        elif e.get("visibility") == "listed":
-            listed.append(name)
-    parts += core
+    parts += [f"\n{{trait:{t['name']}}}\n{t.get('content') or '(empty)'}\n"
+              for t in index.get("core", [])]
+    listed = index.get("listed", [])
     if listed:
         parts.append(
-            f"\nadditional traits (use memory_read on {TRAITS}/<name> to view): "
-            f"{', '.join(sorted(listed))}\n"
+            f"\nadditional traits (use trait_read to view): {', '.join(listed)}\n"
         )
     return ["".join(p for p in parts if p)]
 
 def prompt_text(name):
     """one prompt file's body, or "" when it is absent -- a stage with no prompt is skipped."""
     try:
-        got = _mem("GET", f"{PROMPTS}/{name}.md")
+        got = _mem("workspace.read", path=f"{PROMPTS}/{name}.md")
     except MemoryError:
         return ""
-    return got if isinstance(got, str) else ""
+    # A FABRIC READ ANSWERS `{"path", "text"}`, where the endpoint answered raw bytes. text only:
+    # json cannot carry arbitrary bytes, and a prompt file that is not text is not a prompt file.
+    return (got or {}).get("text", "")
 
 # persona OWNS the system prompt (the traits ARE it), so every system-bearing hook result
 # REPLACES the backend default instead of appending to it. the composed value is still frozen
@@ -273,7 +280,7 @@ def _datetime() -> HookResult:
 
 def _task(task_id):
     """one task, or None. a dot-path read, so finding one does not fetch all the others."""
-    got = _mem("GET", TASKS_TRAIT, key=task_id)
+    got = _traits("trait_data_query", trait=TASKS_TRAIT, key=task_id)
     return got if isinstance(got, dict) and got else None
 
 @tool
@@ -307,7 +314,7 @@ def task_create(
             task["interval"] = interval
         # ONE `$set` ON THE TASK'S OWN KEY, so creating a task neither reads nor rewrites the
         # others -- and two creations racing cannot lose one another.
-        _mem("PATCH", TASKS_TRAIT, {"$set": {task_id: task}})
+        _traits("trait_data_update", trait=TASKS_TRAIT, ops={"$set": {task_id: task}})
         return {"result": result_ok({"id": task_id})}
     except (ValueError, MemoryError) as e:
         return {"result": result_err(str(e))}
@@ -349,7 +356,7 @@ def task_update(
         if status:
             ops[f"{id}.status"] = status
         ops[f"{id}.updated"] = now_iso()
-        _mem("PATCH", TASKS_TRAIT, {"$set": ops})
+        _traits("trait_data_update", trait=TASKS_TRAIT, ops={"$set": ops})
         return {"result": result_ok()}
     except (ValueError, MemoryError) as e:
         return {"result": result_err(str(e))}
@@ -370,7 +377,8 @@ def task_comment(
         # comment FIRST: a crash between the two then leaves a comment against a stale due date,
         # which is visible and self-correcting. the other order leaves a bumped task with no record
         # of why, which is invisible.
-        _mem("POST", TASK_COMMENTS_TRAIT, {"fields": {"task_id": id, "text": text}})
+        _traits("trait_append", trait=TASK_COMMENTS_TRAIT,
+             fields={"task_id": id, "text": text})
         ops = {f"{id}.updated": now_iso()}
         extra = {}
         if task.get("interval") and task.get("due"):
@@ -378,10 +386,23 @@ def task_comment(
             delta = parse_iso_duration(task["interval"])
             extra["due"] = format_iso(old_due + delta)
             ops[f"{id}.due"] = extra["due"]
-        _mem("PATCH", TASKS_TRAIT, {"$set": ops})
+        _traits("trait_data_update", trait=TASKS_TRAIT, ops={"$set": ops})
         return {"result": result_ok(extra)}
     except (ValueError, MemoryError) as e:
         return {"result": result_err(str(e))}
+
+# --- what used to be here: the trait tools (moved out, phase 82) ---
+#
+# `persona_trait_*` WAS A WRAPPER AROUND A FACE THAT WAS TOO WIDE. `workspace_*` addresses the whole
+# tree -- prompts, hooks, tests, blobs -- so reaching one trait meant handing a model all of it, and
+# six wrappers were written here to narrow that back down. That is a boundary error paid for in
+# code: the wrappers, a deny rule to make them the only door, and a `disable` verb to stop the wide
+# tools costing tokens they were never meant to be offered for.
+#
+# THEY ARE THE TRAITS FACE NOW, unchanged in shape -- same six names, same `{trait:NAME}` header,
+# same `{"success": true}` envelope -- and the scope is the face's ROOT rather than a prefix this
+# file remembered to put on. What is left here is what is genuinely persona's: the prompts, the task
+# schema, and the composition above.
 
 # --- prompt tools (the hook owns its prompts, v3) ---
 
@@ -389,7 +410,8 @@ def task_comment(
 def prompt_list() -> HookResult:
     """list the persona's prompt files (the prompt contract driving each lifecycle stage)"""
     try:
-        names = sorted(_named(_index(), PROMPTS))
+        got = _mem("workspace.list", prefix=f"{PROMPTS}/") or {}
+        names = sorted(e["path"][len(PROMPTS) + 1 :] for e in got.get("entries", []))
     except MemoryError as e:
         return {"result": result_err(str(e))}
     return {"result": f"prompts: {', '.join(names)}" if names else "no prompts"}
@@ -400,10 +422,15 @@ def prompt_read(
 ) -> HookResult:
     """read a prompt file. these drive the system prompt (preamble/chat), heartbeat, and recover"""
     try:
-        got = _mem("GET", f"{PROMPTS}/{prompt}")
-        return {"result": got if isinstance(got, str) else json.dumps(got)}
+        got = _mem("workspace.read", path=f"{PROMPTS}/{prompt}")
+        return {"result": (got or {}).get("text") or json.dumps(got)}
     except MemoryError as e:
-        return {"result": str(e)}
+        # STRUCTURED, LIKE EVERY OTHER TOOL HERE. this was the only error path returning a bare
+        # string, and it is the one that could least afford to: this tool's SUCCESS payload is the
+        # arbitrary contents of a file, so a plain sentence is indistinguishable from a prompt that
+        # happens to read like one. `{"error": ...}` makes the difference structural instead of
+        # something the caller has to infer from the words.
+        return {"result": result_err(str(e))}
 
 @tool(permission={"arg": "prompt"})
 def prompt_write(
@@ -412,7 +439,7 @@ def prompt_write(
 ) -> HookResult:
     """create or overwrite a prompt file. affects the next mutate_request/heartbeat/recover"""
     try:
-        _mem("PUT", f"{PROMPTS}/{prompt}", content)
+        _mem("workspace.write", path=f"{PROMPTS}/{prompt}", content=content)
     except MemoryError as e:
         return {"result": result_err(str(e))}
     return {"result": f"wrote {prompt}"}
@@ -441,6 +468,10 @@ def discover(ctx: dict) -> HookResult:
         "name": "persona",
         "test": "persona_test.py",
         "tools": tool_defs(),
+        # THE OPT-IN (hmux phase 76e). without it the host shuts our stdin, which is what every
+        # hook that reads to EOF needs -- and this one no longer does. Declared here because
+        # `discover` is the bootstrap: it runs in the old mode and reads its payload to EOF.
+        "duplex": True,
     }
 
 @hook
@@ -448,7 +479,7 @@ def mutate_request(ctx: dict) -> HookResult:
     # v2 host-capability surfacing: log host/model/user when present.
     host = ctx.get("host") or {}
     if host:
-        debug(f"host={host.get('name', '?')} v={host.get('version', '?')} memory={MEMORY or '(none)'}")
+        debug(f"host={host.get('name', '?')} v={host.get('version', '?')}")
     if "model" in ctx:
         debug(f"model={ctx.get('model') or '(none)'}")
     if "user" in ctx:
@@ -555,13 +586,13 @@ if __name__ == "__main__":
     if not h:
         print(json.dumps({"error": f"unknown hook: {sys.argv[1]}"}))
         sys.exit(1)
+    # ONE LINE, NOT TO EOF. the host holds stdin open to answer our questions, so EOF never comes
+    # -- `read()` here is the deadlock the `duplex` opt-in exists to keep every other hook out of.
+    # `discover` is the exception and reads the same way, because one line is also a whole payload.
     try:
-        ctx = json.loads(sys.stdin.read() or "{}")
+        ctx = json.loads(sys.stdin.readline() or "{}")
     except json.JSONDecodeError:
         ctx = {}
-    # THE ENDPOINT IS LEARNED HERE, ONCE, before any handler runs -- `execute_tool` calls handlers
-    # with the model's arguments only, so a tool has no ctx of its own to read it from.
-    MEMORY = (ctx.get("host") or {}).get("memory") or MEMORY
     try:
         result = h(ctx)
     except Exception as e:

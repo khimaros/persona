@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """the container refuses to boot when it would chown the HOST's /work and /data away from them.
 
-WHY THERE IS ONE AT ALL: docker-compose.yml bind-mounts ./work and ./data, host directories in
-the deployment. The base image's `hmux-drop` runs `chown -R hmux:hmux /work /data` whenever it
+WHY THERE IS ONE AT ALL: docker-compose.yml bind-mounts ./volumes/work and ./volumes/data, host
+directories in the deployment. The base image's `hmux-drop` runs `chown -R hmux:hmux /work /data` whenever it
 starts as root, and under ROOTLESS podman `hmux` (uid 1000 in the container) is a SUBUID on the
 host -- 100999, not you. So a start without `--userns=keep-id:uid=1000,gid=1000 --user=1000:1000`
 rewrites the whole tree to a uid the host cannot read, recoverable only via `podman unshare`.
@@ -82,8 +82,8 @@ def recipe_checks():
 
     # the state this protects. if these ever go back to named volumes the guard is pointless, and
     # a guard that protects nothing is worse than none -- it reads as cover.
-    check("compose bind-mounts ./work and ./data",
-          "./work:/work" in compose and "./data:/data" in compose,
+    check("compose bind-mounts the host's workspace and data directories",
+          "/work:/work" in compose and "/data:/data" in compose,
           "the guard exists because /work and /data are HOST directories; named volumes need none")
     check("the eval still replaces them with named volumes",
           "persona-work:/work" in compose_eval and "persona-data:/data" in compose_eval,

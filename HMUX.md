@@ -187,8 +187,9 @@ host now. hmux is the one front door via `docker compose`.
 1. (base image present) `make build && make up`; `make logs` shows hub + pi backend + faces
    up and the `hcp face: arming` line (persona hooks loaded).
 2. admin: `make admin` (http://localhost:4280/admin) -> chat with Per; SOUL/traits in context,
-   memory_*/task_* tools work, and a core-trait edit (`traits/SOUL.md`) prompts permission in the
-   admin -- note the rule is keyed on the PATH now, not the bare filename.
+   trait_*/task_* tools work, and a core-trait edit (`SOUL.md`) prompts permission in the admin --
+   the rule is keyed on the trait NAME, which is what a `trait_*` tool takes. `workspace_*` is
+   `disable`d in this deployment, so the wide tools are not offered at all.
 3. tui: `make tui` (opencode attach http://localhost:4096) -> same session visible (R7).
 4. omni: http://localhost:4284 -> voice round-trip (with HMUX_VOICE_URL set).
 5. eval: `make eval` -> suite green (a native hub client on :4280/ws drives session

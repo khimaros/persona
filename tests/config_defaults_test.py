@@ -59,7 +59,7 @@ def check(desc, ok, detail=""):
 def main():
     cfg = tomllib.loads(CONFIG.read_text())
     profile = cfg["profile"]["persona"]
-    faces = profile["faces"]
+    faces = profile["spokes"]
     kinds = {f["kind"] for f in faces}
 
     # the bridge idles without HMUX_BRIDGE_* rather than failing, so shipping it declared costs a
@@ -103,7 +103,7 @@ def main():
     federation = next((f for f in faces if f["kind"] == "federation"), None)
     if federation is not None:
         setting = (federation.get("federation") or {}).get("tools", "ask")
-        policy = profile["faces"]
+        policy = profile["spokes"]
         perms = next((f for f in policy if f["kind"] == "permission"), {})
         rules = ((perms.get("permission") or {}).get("tools")) or {}
         check(f"the federation `tools` setting is one hmux knows: {setting!r}",
@@ -165,13 +165,17 @@ def main():
     hmux_bin = shutil.which("hmux") or (
         Path(__file__).resolve().parents[2] / "hmux" / "target" / "debug" / "hmux"
     )
+    # ASKED UNDER EVERY VERB, because a kind's CLASS is hmux's business and not this file's. the
+    # grouped cli (hmux phase 14) files a kind under `ui`, `service` or `face`, and hard-coding one
+    # verb here made this guard report ten missing faces against a binary that carries all of them.
     if Path(hmux_bin).exists():
         for kind in sorted(kinds):
-            known = subprocess.run(
-                [str(hmux_bin), "face", kind, "--help"],
-                capture_output=True,
+            known = any(
+                subprocess.run([str(hmux_bin), verb, kind, "--help"],
+                               capture_output=True).returncode == 0
+                for verb in ("service", "ui", "face")
             )
-            check(f"`{kind}` is a face kind this hmux carries", known.returncode == 0,
+            check(f"`{kind}` is a face kind this hmux carries", known,
                   f"`hmux up` would refuse it at boot and start nothing at all")
     else:
         print(f"SKIP: no hmux binary at {hmux_bin}; cannot check declared kinds")
