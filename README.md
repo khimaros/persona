@@ -187,6 +187,20 @@ you add ONE permission rule without restating the policy -- and it is the only w
 key like `"htru_*"` at all, since a `*` is not legal in an environment variable name. between the
 two, a deployment should not need to edit the checked-in config.
 
+a spoke `hmux/config.toml` carries with `enabled = false` is configured and not running, which is
+how federation ships: its substrates, tools setting, verify mode and permission rules are all
+there, off. turning it on for one box is three lines in `hmux/config.local.toml` and restates none
+of them:
+
+```toml
+[[profile.persona.spokes]]
+kind = "federation"
+enabled = true
+```
+
+`up` names every spoke it skipped at boot, so a face that is off says so rather than looking like
+one that crashed.
+
 what the runtime decides BEFORE the container exists -- published ports, where `/work` and
 `/data` live, the uid -- cannot come from `persona.env`, because it is handed to the container
 only after all of that is settled. those are flags on the run command, or the `ports:` /
@@ -385,6 +399,38 @@ pull it, or build it from the [hmux](https://github.com/khimaros/hmux) repo
 make build
 make up
 ```
+
+#### the fast path, for verifying someone's fix
+
+the full build above is 15-20 minutes, most of it recompiling from source what your machine has
+already compiled. when you just need to try a change someone has handed you, there is a second
+build that lays the host's existing build output over the last full image instead:
+
+```
+cd ../hmux && make rust && make image-dev     #  18s -> khimaros/hmux:dev
+cd ../persona && make image-dev               # 108s -> khimaros/persona:dev
+PERSONA_IMAGE=khimaros/persona:dev make down up
+```
+
+to go back to the released image, run `make down && make up` with `PERSONA_IMAGE` unset. it defaults
+to `khimaros/persona:latest`, and the two are separate images -- a dev build cannot take the release
+tag.
+
+`make down up` and NOT `make up`: podman-compose does not recreate a container when only the image
+tag changed, so a bare `make up` prints the new image id, exits 0, and leaves the old container
+running. (`down` is safe here -- it has no `-v`, and /work and /data are host directories.)
+
+three things this build does deliberately:
+
+- it **refuses** if any artifact it needs is missing, and names each one, rather than silently
+  keeping the older copy from the base image. if it stops you, build what it asks for and re-run.
+- the container **says what it is** on every start, so `podman logs` cannot mislead you:
+  `hmux: DEV BUILD: THIS IS A DEV OVERLAY, NOT A RELEASE.`
+- `make publish` **refuses** a dev image, in this repo and in hmux.
+
+it carries debug binaries, because that is what a development machine has warm. that is fine for
+"does the fix work" and wrong for anything timed -- cut a real `make image` before measuring
+latency.
 
 ## evals
 

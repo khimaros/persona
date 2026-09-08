@@ -102,6 +102,13 @@ def main():
     # other, so this is the only place the pair is checked.
     federation = next((f for f in faces if f["kind"] == "federation"), None)
     if federation is not None:
+        # DECLARED AND OFF. federation opens this agent to other boxes, which is exactly the class
+        # of setting this file says must be turned on per-deployment. it is a full row rather than a
+        # comment so `config.local.toml` can flip it with two lines and inherit everything below --
+        # the merge matches spoke rows by kind, and a comment is not a row.
+        check("the federation face is declared but not enabled",
+              federation.get("enabled") is False,
+              "shipping it on would federate every deployment that copies this file")
         setting = (federation.get("federation") or {}).get("tools", "ask")
         policy = profile["spokes"]
         perms = next((f for f in policy if f["kind"] == "permission"), {})

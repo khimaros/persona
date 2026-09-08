@@ -80,6 +80,47 @@ image build:
 	HMUX_IMAGE=$(HMUX_REF) BROWSER_USE_IMAGE=$(BROWSER_USE_REF) $(COMPOSE) build
 .PHONY: image build
 
+# persona over the hmux DEV OVERLAY (hmux phase 156): host build output laid over the last full
+# image instead of compiled in a builder stage. for the dev loop; never for a release.
+#
+# THE `:dev` TAG IS THE POINT, not a convenience. persona's compose used to hardcode
+# `khimaros/persona:latest`, so a build on a dev base quietly took the release tag and the next
+# `make down && make up` deployed it -- indistinguishable from a real release except for one line
+# in the container's own log. PERSONA_IMAGE keeps the two apart.
+#
+# THE DEV MARKER SURVIVES THE MIX. persona's FROM is browser-use, so hmux's LABEL does NOT come
+# with it -- but `/opt/hmux/DEV_BUILD` rides in on the `COPY --from=hmux /opt/hmux`, and persona's
+# entrypoint ends with `exec /usr/local/bin/hmux-drop`, which prints it. so a dev persona announces
+# itself on every start exactly as a dev hmux does.
+DEV_HMUX_REF   ?= $(LOCAL_PREFIX)khimaros/hmux:dev
+PERSONA_DEV_IMAGE ?= khimaros/persona:dev
+image-dev:
+	@docker image inspect $(DEV_HMUX_REF) > /dev/null 2>&1 || { \
+		echo "image-dev: $(DEV_HMUX_REF) does not exist."; \
+		echo "           build it first: cd $(HMUX_DIR) && make image-dev"; \
+		exit 1; \
+	}
+	PERSONA_IMAGE=$(PERSONA_DEV_IMAGE) HMUX_IMAGE=$(DEV_HMUX_REF) \
+		BROWSER_USE_IMAGE=$(BROWSER_USE_REF) $(COMPOSE) build
+	@echo ""
+	@echo "built $(PERSONA_DEV_IMAGE). run it with:"
+	@echo "    PERSONA_IMAGE=$(PERSONA_DEV_IMAGE) make down up"
+.PHONY: image-dev
+
+# REFUSE TO PUBLISH A DEV-DERIVED PERSONA. this reads the MARKER FILE rather than a label, unlike
+# hmux's guard: persona's parent is browser-use, so hmux's label does not propagate and only the
+# file crosses the mix. one throwaway container, on an operation that already takes minutes.
+image-dev-guard:
+	@if docker run --rm --entrypoint test $(IMAGE):latest -f /opt/hmux/DEV_BUILD 2>/dev/null; then \
+		echo "publish: REFUSING -- $(IMAGE):latest carries /opt/hmux/DEV_BUILD, so it was mixed"; \
+		echo "  over an hmux dev overlay rather than a release base."; \
+		docker run --rm --entrypoint cat $(IMAGE):latest /opt/hmux/DEV_BUILD 2>/dev/null | sed 's/^/    /'; \
+		echo ""; \
+		echo "  rebuild with \`cd $(HMUX_DIR) && make image\` then \`make image\` here."; \
+		exit 1; \
+	fi
+.PHONY: image-dev-guard
+
 # compose loads persona.env with the SHORT `env_file` form (the compatible one), which requires the
 # file to exist -- so seed it from the example, whose every line is commented and therefore changes
 # nothing. a fresh clone comes up without an editing step.
@@ -158,8 +199,13 @@ publish-stack:
 	$(MAKE) publish
 .PHONY: publish-stack
 
+image-stack:
+	$(MAKE) -C $(HMUX_DIR) image
+	$(MAKE) image
+.PHONY: image-stack
+
 PUSH_GHCR ?=
-publish: image
+publish: image image-dev-guard
 	docker tag $(IMAGE):latest $(DOCKERHUB):$(TAG)
 	@if [ -n "$(PUSH_GHCR)" ]; then \
 		echo "publishing to docker hub + ghcr"; \

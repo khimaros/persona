@@ -20,7 +20,11 @@ services:
       args:
         HMUX_IMAGE: ${HMUX_IMAGE:-khimaros/hmux:latest}
         BROWSER_USE_IMAGE: ${BROWSER_USE_IMAGE:-khimaros/browser-use:latest}
-    image: khimaros/persona:latest
+    # PARAMETERISED SO A DEV BUILD CANNOT TAKE THIS TAG. `make image-dev` mixes persona over a dev
+    # hmux overlay, and with this hardcoded it silently REPLACED the release `:latest` -- which the
+    # deployment then runs on the next `make down && make up`, looking exactly like a release. the
+    # dev target sets it to `:dev`; nothing else does, so the normal path is unchanged.
+    image: ${PERSONA_IMAGE:-khimaros/persona:latest}
     # defaults to `persona`; the eval overrides it (with a matching COMPOSE_PROJECT_NAME)
     # to give each run a uniquely named container + fresh volumes. see the Makefile eval target.
     container_name: ${PERSONA_CONTAINER:-persona}

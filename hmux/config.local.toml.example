@@ -19,6 +19,14 @@
 #[profile.persona.spokes.permission.tools]
 #"htru_*" = "allow"
 
+# turn federation on for this box. hmux/config.toml carries the whole block already -- substrates,
+# tools, verify, and the permission rules for its tools -- with `enabled = false`, so this is the
+# entire edit and nothing below is restated:
+#
+#[[profile.persona.spokes]]
+#kind = "federation"
+#enabled = true
+
 # require a compared short auth string before a peer may ask anything. hmux defaults to "sas" and
 # hmux/config.toml relaxes it to "tofu"; this puts it back, and an unverified peer's turns are then
 # refused until `federation_verify` has been run on both ends:

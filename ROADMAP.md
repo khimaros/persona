@@ -623,4 +623,80 @@
             compose`) and `up` passes COMPOSE_RUN_ARGS, so a workstation runs the SAME invocation
             as production and a difference between them cannot be a surprise. the eval targets
             pass it too.
+
+[ ] TABLED (2026-09-06, user-raised): push the display packages down into khimaros/browser-use
+    instead of installing them over the top of it.
+    NOT FOR THE LAYER ECONOMICS that made browser-use the base. measured with `podman history`:
+    the whole `xvfb x11-utils jwm` layer is 5.61MB, sitting above 1.25GB of hmux payload that
+    gets fresh digests every release regardless. it is that cheap PRECISELY because it sits
+    above chrome, which already dragged in the x libs and the fonts -- move it below and the
+    same bytes just change layers. the 1575MB-of-2747MB argument does not transfer.
+    THE ARGUMENT THAT DOES HOLD IS OWNERSHIP. `browser-head` tries headed only when $DISPLAY is
+    set and falls back to headless, and nothing in the base can produce a display -- so the
+    image that ships "a browser and the tooling to drive it" cannot open a window on its own.
+    that is the same gap browser-head itself was written to fill, one layer over.
+    IF IT MOVES, MOVE THE WHOLE DECISION: a `browser-display` script beside browser-head owning
+    start-Xvfb-then-wm, with persona's entrypoint calling it and passing its own jwmrc. today
+    the display is six things (packages, jwmrc, the `jwm -p` build check, ~90 lines of entrypoint
+    bootstrap, PERSONA_WM/DISPLAY/SCREEN, and the /canvas reason it exists); moving the apt line
+    alone buys 5.61MB and costs one decision spread across two images. x11-utils goes with it
+    (the xdpyinfo probe is generic). KEEP `jwm -p -f /etc/persona/jwmrc` IN PERSONA whatever
+    else moves -- it is what makes an old base fail the build loudly instead of degrading at boot.
+    WATCH: `make image` deliberately does not depend on browser-use-image, and khimaros/browser-use
+    is never published, so anything pushed down there exists only on the box that built it.
+
+[ ] a SECOND, non-hermetic image path that overlays HOST build output, for the dev loop
+    (2026-09-06, user-raised). the hmux half is the bulk of it and wants its own entry there.
+    [ ] shape: an OVERLAY, not a second builder stage. `FROM khimaros/hmux:latest` plus the
+        artifact COPYs, which inherits the mise tree, the opencode postinstall and the
+        wasm-bindgen layer untouched and runs in seconds. the runtime stage's existing COPY
+        list IS the manifest of what to overlay.
+    [ ] fed from a staging dir the Makefile assembles, NOT the repo root: `**/target` and
+        `**/node_modules` are .dockerignored for reasons that should not be relaxed, the
+        context stays small, and the staging step is the one place that records what went in.
+    [ ] DEBUG BINARIES ARE FINE HERE (user decision). the 27.7G of warm cargo cache on this box
+        (19G root + 4.8G federation + 3.9G bridge) is all the DEBUG profile -- there is no
+        `target/release/hmux` at all -- so a release fast-build would pay a full cold compile
+        first and only win from build 2. debug uses the cache that is already hot.
+    [ ] the two obstacles the hmux Dockerfile header names are both smaller than it says, MEASURED:
+        host and container are both `Debian GLIBC 2.43-3`, forky/sid, identical; and the only
+        RUNTIME `CARGO_MANIFEST_DIR` bake left is `harness.rs:1227 default_plugin_path()`, which
+        `harness.rs:1255` already lets `$HMUX_OC_PLUGIN` override -- and the runtime stage sets it.
+        every other hit is `#[cfg(test)]` or `current_exe()`, which resolves at run time.
+        "build path == run path" is true of a dev checkout, not a constraint on the image.
+    [ ] IT MUST BE UNPUBLISHABLE, which is the only part that needs care. every incident in this
+        repo's history is a build that looked identical to a fresh one -- twice from a stale base.
+        so: tag `:dev` and never `:latest`; bake a marker with host, user, timestamp and
+        `git describe --dirty`; `publish` refuses outright when the marker is present; and it
+        prints AT RUNTIME, not just in the build log, so a deployment says what it is out loud.
+    [ ] a guard asserting the image carries no rust/python source and no `crates/`, applied to
+        BOTH paths rather than to the fast one -- the class, not the instance. baseline measured
+        2026-09-06 on the shipped image: 0 `.rs`, 0 `.dart`, 0 `.py`, no crates/faces/e2e/docs/
+        Cargo.toml/.git, and 79 non-node_modules `.ts` that all have to be there (spoke ships as
+        source for `@hmux/spoke/portable`, the backends are type-stripped at run time, and the
+        dist/wasm `.d.ts` are wasm-bindgen output). the one arguable entry is
+        `clients/spoke/test` (12 files), test code in a production image.
+    [ ] NOTE this is the fast loop returning in the one shape that dodges both failures that
+        killed the last one (Makefile:102-109): a bind mount of `backends/` shadowed the image's
+        copy with the host's broken `.pi-sdk` symlink, and a client rebuild `rmSync`s `dist` so
+        the mount pointed at a dead inode. baked artifacts have neither, because nothing is mounted.
+    [ ] persona needs no change to consume it: `make image HMUX_REF=localhost/khimaros/hmux:dev`
+        already works through the existing ARG.
+
+[x] federation ships CONFIGURED AND OFF (2026-09-07, user-raised). the mechanism is hmux phase 162:
+    `enabled` on a spoke row, default TRUE, so `enabled = false` is a row that carries a spoke's
+    settings without running it.
+    [x] the federation block is UNCOMMENTED in hmux/config.toml with `enabled = false` --
+        substrates, tools = "manage", verify = "tofu" -- and its seven `federation_*` permission
+        rules are uncommented with it. inert while it is off, and the reason they are there: a
+        local file that turns it on inherits the policy too.
+    [x] config.local.toml turns it on in three lines (`kind = "federation"` + `enabled = true`);
+        hmux/config.local.toml.example carries it commented. VERIFIED against the real block: the
+        base file's `--federation-config {"substrates":[...],"tools":"manage","verify":"tofu"}`
+        reaches the spawn unrestated. a commented block could never do this -- the merge matches
+        spoke rows by kind and a comment is not a row.
+    [x] tests/config_defaults_test.py asserts federation is declared AND `enabled is False`, and
+        its existing tool-policy checks now run against that row -- they were dead while the block
+        was a comment. 57 passed, 0 failed; `make test` all green.
+    [ ] needs a base-image rebuild, not a restart: hmux/config.toml is COPYd into the image.
 ```
