@@ -32,9 +32,23 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # as a well-behaved PID 1, and the shared libs a node binary links. an image mixed in on top (see
 # the header) needs these too, and they belong down here with the other stable packages rather
 # than in a layer above the payload, where they would be remade on every downstream build.
+#
+# AND A DISPLAY TO DRIVE THE BROWSER ON. `browser-head` tries headed only when $DISPLAY is set and
+# falls back to headless, so without these the image that ships "a browser and the tooling to drive
+# it" cannot open a window on its own -- the same gap browser-head exists to fill, one layer down.
+# xvfb is the display, jwm the window manager chrome needs to be given a real window by (3 packages
+# and 1.4MB, against openbox's 29 and 64MB), and x11-utils is `xdpyinfo`, the generic probe for
+# whether a forwarded $DISPLAY actually answers.
+#
+# BEFORE CHROME, DELIBERATELY. installing google-chrome's .deb adds
+# /etc/apt/sources.list.d/google-chrome.sources as a side effect, and `apt-get update` fails the
+# WHOLE run if any configured source is broken -- which is exactly what stopped persona's build on
+# 2026-09-09, when Google served a Packages.gz that did not match its own signed InRelease. Debian
+# packages have no business waiting on Google's index, and up here they do not.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates git tini libatomic1 libstdc++6 libgcc-s1 \
+      xvfb x11-utils jwm \
  && rm -rf /var/lib/apt/lists/*
 
 # real google-chrome, not chromium: browser-use drives `google-chrome` over CDP and chromium is

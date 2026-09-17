@@ -72,11 +72,31 @@ browser-use-image:
 	docker build -t $(BROWSER_USE_IMAGE):latest images/browser-use
 .PHONY: browser-use-image
 
+# REFUSE EARLY IF A BASE IS MISSING, because the error podman gives for one is about the network.
+# `localhost/` makes the ref unambiguous (see above) but it is still a REGISTRY reference: with no
+# such image on disk, podman tries to PULL it from a registry literally named `localhost` and the
+# build dies with `dial tcp 127.0.0.1:443: connect: connection refused`. That names DNS, a port and
+# a refused socket, and none of the three is the problem -- the problem is that a base was never
+# built. Observed 2026-09-09 on a `make image` after the browser-use tag went missing.
+#
+# CHECKED HERE RATHER THAN DEPENDED ON. making `image` depend on `browser-use-image` would rebuild
+# ~1.4GB of never-changing chrome on every persona build, which is the whole reason that base is a
+# separate image. So this asserts the base EXISTS and says how to get it, without building it.
+define require_image
+	@docker image exists $(1) 2>/dev/null || { \
+		echo "persona: missing base image \`$(1)\`" >&2; \
+		echo "         build it with: $(2)" >&2; \
+		echo "         (podman would otherwise try to PULL this and fail against a registry named 'localhost')" >&2; \
+		exit 1; }
+endef
+
 # build persona's OCI image. `image` and `build` are the same target: `image` mirrors the
 # hmux repo's name (and is what `publish` hangs off), `build` is the compose-lifecycle name.
 # it does NOT depend on browser-use-image: that base is expensive and near-static, so it is built
 # deliberately (`make browser-use-image`) rather than on every persona build.
 image build:
+	$(call require_image,$(BROWSER_USE_REF),make browser-use-image)
+	$(call require_image,$(HMUX_REF),cd ../hmux && make image)
 	HMUX_IMAGE=$(HMUX_REF) BROWSER_USE_IMAGE=$(BROWSER_USE_REF) $(COMPOSE) build
 .PHONY: image build
 
@@ -205,7 +225,7 @@ image-stack:
 .PHONY: image-stack
 
 PUSH_GHCR ?=
-publish: image image-dev-guard
+push:
 	docker tag $(IMAGE):latest $(DOCKERHUB):$(TAG)
 	@if [ -n "$(PUSH_GHCR)" ]; then \
 		echo "publishing to docker hub + ghcr"; \
@@ -220,6 +240,9 @@ publish: image image-dev-guard
 		echo "skipping ghcr (PUSH_GHCR=1 to include it)"; \
 		docker push $(DOCKERHUB):$(TAG); \
 	fi
+.PHONY: push
+
+publish: image image-dev-guard push
 .PHONY: publish
 
 # --- attach ---

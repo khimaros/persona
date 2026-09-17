@@ -94,8 +94,17 @@ RUN NODE_BIN="$(dirname "$(readlink -f /usr/local/bin/node)")" \
 # actually ANSWERS before deferring to it. that question cannot be answered by looking: a
 # bind-mounted /tmp/.X11-unix carries the host's socket FILES but not its abstract sockets, so a
 # desktop's X0 is present, refuses connections, and looks exactly like a working one.
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb x11-utils jwm \
- && rm -rf /var/lib/apt/lists/*
+# THE PACKAGES LIVE IN THE BASE NOW (images/browser-use/Dockerfile), not here. They moved for
+# OWNERSHIP -- an image that ships a browser and the tooling to drive it could not open a window on
+# its own -- and the move also takes persona's build off `apt-get update` entirely, so a broken
+# third-party index can no longer block a release. It blocked two on 2026-09-09.
+#
+# NOT FOR THE LAYER ECONOMICS, which do not transfer: the layer was 5.61MB precisely because it sat
+# above chrome, which had already dragged in the X libs and the fonts. Below it, the same bytes just
+# change layers.
+#
+# WHAT STAYS HERE IS THE VERIFICATION, and deliberately: a base without these is now a silent
+# failure at boot rather than a loud one at build, so the `jwm -p` check below is what catches it.
 
 # PARSED AT BUILD TIME. `jwm -p` reads the config and exits without needing a display, so a typo
 # that would leave the canvas unmanaged fails the build here rather than at boot in a container

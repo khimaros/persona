@@ -699,4 +699,57 @@
         its existing tool-policy checks now run against that row -- they were dead while the block
         was a comment. 57 passed, 0 failed; `make test` all green.
     [ ] needs a base-image rebuild, not a restart: hmux/config.toml is COPYd into the image.
+
+[x] a skill can name its own session (2026-09-09, from the hmux 168 pi bump). pi 0.82.0 exposes
+    PI_SESSION_ID, PI_SESSION_FILE, PI_PROVIDER, PI_MODEL and PI_REASONING_LEVEL to commands run by
+    the built-in and factory-created bash tools. Persona's skills all run under bash and until now
+    could not say which session they belonged to without hmux plumbing it through.
+    [x] VERIFIED PRESENT rather than read off a changelog: all five strings are in the 0.85.1 sdk
+        and NONE of them is in 0.80.10, so this arrived with the bump.
+    [x] NO CODE CHANGE HERE, and that is the finding rather than an omission -- the variables are
+        set by pi around the command, so a skill that wants them just reads them. This entry exists
+        so the next skill that needs a session id looks for it in the environment instead of asking
+        for a new hook.
+    [ ] no skill uses them yet. worth doing when one has a reason -- writing a consumer only to
+        demonstrate the capability would be a use nobody asked for.
+
+[x] a missing base image reported a refused TCP connection (2026-09-09, user-reported). `make image`
+    died with `dial tcp 127.0.0.1:443: connect: connection refused` while pulling
+    `localhost/khimaros/browser-use:latest`. NOTHING ABOUT THE NETWORK WAS WRONG: `localhost/` makes
+    the ref unambiguous under podman but it is still a REGISTRY reference, so with no such image on
+    disk podman tries to PULL it from a registry literally named `localhost`. The error names DNS, a
+    port and a socket, and the actual cause is that a base was never built.
+    [x] `require_image` in the Makefile asserts both bases exist before `$(COMPOSE) build` and names
+        the command that produces each. Verified by pointing it at a ref that cannot exist: it
+        refuses in under a second with the real cause and never reaches podman.
+    [x] CHECKED, NOT DEPENDED ON. making `image` depend on `browser-use-image` would rebuild ~1.4GB
+        of never-changing chrome on every persona build, which is the entire reason that base is a
+        separate image. The guard asserts and explains; it does not build.
+    [ ] HOW THE TAG WENT MISSING IS UNEXPLAINED. `make browser-use-image` succeeded earlier the same
+        day, and untagged chrome-sized layers from ~30 minutes before the failure are still on disk
+        -- so it was built and then lost its tag rather than never existing. Worth knowing if it
+        recurs; the guard makes it a clear message either way.
+[~] dependency sweep (2026-09-10, user: "update all of our dependencies across the hub and all spokes")
+    the hmux half is upstream phase 171 -- rust 1.98.1, node 26.8.2, flutter 3.47.3, gradle 9.7.1,
+    AGP 9.4.0, Kotlin 2.4.20, opencode 1.18.30, and every rust/node/dart manifest in that tree.
+    [x] PERSONA DECLARES ALMOST NOTHING, and that is the finding rather than an omission. It has no
+        Cargo.toml, package.json or pubspec; its python is stdlib-only (pytest reaches only the
+        evals). The whole dependency surface is two base images plus one pinned commit, so "update
+        persona's dependencies" means rebuilding the bases and re-deciding that one pin.
+    [x] THE ROLLING HALF NEEDS NO EDIT. `debian:forky-slim` and
+        `google-chrome-stable_current_amd64.deb` are both moving targets by construction, so
+        `make browser-use-image` picks up whatever is current. Nothing to bump; it is a rebuild.
+    [ ] BROWSER-USE STAYS AT `8fc4f34a`, AND THE UPGRADE IS A PHASE OF ITS OWN. The pin says it
+        exists because `connect` landed after the 0.12.6 tag. Upstream is now 0.13.10 and the CLI
+        was rewritten in 3.0: `browser_use/skill_cli/` is gone (404 at that tag), the entry point
+        is `browser_use/cli.py`, and `connect`, `open`, `close`, `sessions`, `state` and
+        `screenshot` are all entries in a `_LEGACY_HINTS` table that prints a migration message and
+        exits 2. The new CLI takes raw Python on stdin.
+        WHAT THAT COSTS HERE, precisely: `images/browser-use/scripts/browser-head` calls
+        `browser-use connect` four times and `browser-use close` twice, and
+        `skills/browser-use/SKILL.md` documents the subcommand form as the agent's interface. So
+        the bump rewrites the script AND the skill -- it changes how Per drives a browser, which is
+        not a thing to do inside a dependency sweep.
+        (upstream also ships its own skill now: `browser-use skill install`. Worth reading before
+        writing ours by hand.)
 ```
