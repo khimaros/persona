@@ -10,6 +10,24 @@ CONNECT_RETRIES=10
 CONNECT_DELAY=1
 PIDFILE="/tmp/browser-head.pid"
 
+# everything chrome would otherwise report, switched off at launch. THE IMAGE ALSO SHIPS THE
+# MATCHING MANAGED POLICY (/etc/opt/chrome/policies/managed), and the overlap is deliberate: policy
+# is the lever that reaches a chrome nothing here started, while flags reach the things policy has
+# no key for -- breakpad, hyperlink auditing, and the features below, each of which is an
+# independent fetch from a google endpoint. --metrics-recording-only keeps the UMA machinery
+# running locally with the uploader off, so nothing queues up waiting for consent either.
+CHROME_PRIVACY_ARGS=(
+  --disable-background-networking
+  --disable-breakpad
+  --disable-domain-reliability
+  --disable-sync
+  --no-pings
+  --disable-client-side-phishing-detection
+  --safebrowsing-disable-auto-update
+  --metrics-recording-only
+  --disable-features=OptimizationHints,OptimizationGuideModelDownloading,AutofillServerCommunication,MediaRouter,Translate,InterestFeedContentSuggestions
+)
+
 # launch chrome (extra args select headed vs headless), wait for browser-use to connect, and record
 # the pid. returns 0 once connected; 1 if chrome exits or never accepts a connection, so the caller
 # can retry (e.g. headed -> headless when the X display is unreachable). CHROME_BASE_ARGS is set by
@@ -85,6 +103,7 @@ cmd_start() {
     --disable-dev-shm-usage
     --no-first-run
     --no-default-browser-check
+    "${CHROME_PRIVACY_ARGS[@]}"
   )
 
   # headed when $DISPLAY is set AND the X server is reachable; otherwise fall back to headless so

@@ -297,6 +297,20 @@ your desktop -- the same instance the agent drives, so you can watch, or take ov
 captcha. it blocks until you close the window; `make browser-stop` closes the session from
 another shell.
 
+#### nothing here reports on your browsing
+
+both halves of the browser image phone home by default, and the image turns both off. browser-use
+would otherwise send events to posthog, sync runs to `api.browser-use.com` and ping pypi on every
+run; chrome would send UMA, fetch a variations seed, beacon failed requests, look urls up against
+safebrowsing, query autofill and translate, and run the privacy sandbox. the settings ship in the
+image itself (env vars plus a chrome managed policy at `/etc/opt/chrome/policies/managed`), so a
+bare `docker run` on the base gets them too, not just this compose file.
+
+to turn any of it back on for a debugging session, set the variable in `persona.env`
+(`ANONYMIZED_TELEMETRY`, `BROWSER_USE_CLOUD_SYNC`, `BROWSER_USE_VERSION_CHECK`); the chrome half
+is policy and needs a rebuild. `python3 tests/telemetry_test.py` checks all of it against the
+built image, including the flags on a chrome it really starts.
+
 #### watching from anywhere
 
 you do not need any of that to watch. the container runs **its own display** (an Xvfb the

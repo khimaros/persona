@@ -294,6 +294,7 @@ test:
 	python3 tests/permission_policy_test.py
 	python3 tests/config_defaults_test.py
 	python3 tests/display_test.py
+	python3 tests/telemetry_test.py
 	python3 tests/userns_guard_test.py
 .PHONY: test
 

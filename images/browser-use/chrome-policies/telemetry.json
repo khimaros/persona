@@ -1,0 +1,29 @@
+{
+  "MetricsReportingEnabled": false,
+  "UrlKeyedAnonymizedDataCollectionEnabled": false,
+  "DomainReliabilityAllowed": false,
+  "UserFeedbackAllowed": false,
+  "FeedbackSurveysEnabled": false,
+
+  "ChromeVariations": 2,
+  "ComponentUpdatesEnabled": false,
+
+  "SafeBrowsingProtectionLevel": 0,
+  "SafeBrowsingExtendedReportingEnabled": false,
+  "PasswordLeakDetectionEnabled": false,
+
+  "SyncDisabled": true,
+  "BrowserSignin": 0,
+
+  "SearchSuggestEnabled": false,
+  "SpellCheckServiceEnabled": false,
+  "TranslateEnabled": false,
+  "AlternateErrorPagesEnabled": false,
+  "NetworkPredictionOptions": 2,
+  "EnableMediaRouter": false,
+
+  "PrivacySandboxAdTopicsEnabled": false,
+  "PrivacySandboxSiteEnabledAdsEnabled": false,
+  "PrivacySandboxAdMeasurementEnabled": false,
+  "PrivacySandboxPromptEnabled": false
+}

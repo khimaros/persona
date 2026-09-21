@@ -70,6 +70,39 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
       uv tool install --python /usr/bin/python3 \
       "browser-use[cli] @ git+https://github.com/browser-use/browser-use@${BROWSER_USE_REF}"
 
+# NOTHING IN THIS IMAGE REPORTS ON WHAT IT IS DOING, and both halves of it do by default.
+#
+# browser-use builds a posthog client the first time anything imports its telemetry service and
+# ships event names, durations and error text to eu.i.posthog.com; the SAME flag also decides
+# whether runs sync to api.browser-use.com (browser_use/config.py derives BROWSER_USE_CLOUD_SYNC
+# from ANONYMIZED_TELEMETRY), and a third one pings pypi on every agent run. all three default to
+# ON and none of them says so at the point of use -- measured on the 2026-09-15 build, where
+# `ProductTelemetry()._posthog_client` was a live posthog.Posthog. the cloud flag is set here
+# EXPLICITLY rather than left to derive, so that turning telemetry back on for a debugging session
+# does not silently take the run upload with it.
+#
+# ENV RATHER THAN COMPOSE, and it belongs down here rather than in a consumer's tree: persona
+# inherits this by building FROM it, but a bare `docker run` on the base gets nothing from
+# persona's compose file, and this image is a base other people build on.
+#
+# SET AFTER THE INSTALLS AND BEFORE THE VERIFY, which is the only ordering that is both cheap and
+# honest: an ENV change rebuilds the few kB below it rather than chrome, and the `browser-use
+# --help` at the end of this file then runs with telemetry already off.
+ENV ANONYMIZED_TELEMETRY=false \
+    BROWSER_USE_CLOUD_SYNC=false \
+    BROWSER_USE_VERSION_CHECK=false
+
+# chrome's own set is larger and quieter: UMA, the variations seed, domain reliability beacons,
+# safebrowsing lookups, autofill queries, translate, omnibox suggestions, the privacy sandbox.
+# managed policy is the lever that reaches EVERY chrome in the image rather than only the ones
+# browser-head launched, and /etc/opt/chrome/policies/managed is compiled into the binary, so that
+# path is not a choice. browser-head passes the matching command-line flags as well; the two
+# overlap deliberately, since a flag also covers what policy has no key for.
+#
+# a policy name chrome does not recognise is ignored WITHOUT A WORD, which looks exactly like one
+# that works -- so tests/telemetry_test.py looks every name up in the shipped binary.
+COPY chrome-policies/ /etc/opt/chrome/policies/managed/
+
 # the driving scripts (browser-head: start/stop/status a chrome the CLI is connected to). they
 # belong to THIS image -- an image that ships a browser and no way to drive it is half an
 # interface -- so the source lives beside this Dockerfile rather than in a consumer's tree.
